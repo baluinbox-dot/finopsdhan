@@ -521,3 +521,35 @@ def admin_toggle_publish(request: Request, db: DbSession, current_user: Superadm
         db.commit()
         flash(request, f"{strategy.name} is now {'published' if strategy.is_published else 'unpublished'}.", "success")
     return RedirectResponse("/strategies/admin", status_code=303)
+
+
+@router.post("/admin/{strategy_id}/delete")
+def admin_delete_strategy(request: Request, db: DbSession, current_user: SuperadminUser, strategy_id: uuid.UUID):
+    """Permanently remove a strategy definition and every user's instance
+    of it (across all users, not just the superadmin) — blocked if any of
+    those instances has an open position, so nothing vanishes unresolved."""
+    strategy = db.get(Strategy, strategy_id)
+    if strategy is None:
+        flash(request, "Strategy not found.", "error")
+        return RedirectResponse("/strategies/admin", status_code=303)
+
+    instances = db.scalars(select(UserStrategy).where(UserStrategy.strategy_id == strategy_id)).all()
+    for us in instances:
+        if find_open_run(us) is not None:
+            flash(
+                request,
+                f"Cannot delete {strategy.name} — a user still has an open position on "
+                f"{us.label or strategy.name}. It must be closed first.",
+                "error",
+            )
+            return RedirectResponse("/strategies/admin", status_code=303)
+
+    name = strategy.name
+    for us in instances:
+        db.delete(us)  # cascades to that instance's runs/orders
+    db.delete(strategy)
+    db.commit()
+
+    suffix = f" and {len(instances)} user instance(s)" if instances else ""
+    flash(request, f"{name} deleted{suffix}.", "success")
+    return RedirectResponse("/strategies/admin", status_code=303)
