@@ -12,14 +12,14 @@
 
 {% if not has_dhan %}
 <div class="alert alert-warning">
-    Connect your Dhan account on the <a href="/settings/dhan">Settings page</a> before configuring this strategy —
+    Connect your Dhan account on the <a href="{{ url('/settings/dhan') }}">Settings page</a> before configuring this strategy —
     the expiry and strike info below is fetched live from your own Dhan connection.
 </div>
 {% else %}
 
 <div class="card stat-card mb-3" style="max-width: 720px;">
     <div class="card-body">
-        <form method="get" action="/strategies/{{ strategy.id }}/configure" class="row g-2 align-items-end">
+        <form method="get" action="{{ url('/strategies/' ~ strategy.id ~ '/configure') }}" class="row g-2 align-items-end">
             <input type="hidden" name="user_strategy_id" value="{{ user_strategy_id }}">
             <div class="col-auto">
                 <label class="form-label small mb-0">Underlying</label>
@@ -59,7 +59,7 @@
 
 <div class="card stat-card" style="max-width: 720px;">
     <div class="card-body">
-        <form method="post" action="/strategies/{{ strategy.id }}/configure" class="row g-3">
+        <form method="post" action="{{ url('/strategies/' ~ strategy.id ~ '/configure') }}" class="row g-3">
             <input type="hidden" name="user_strategy_id" value="{{ user_strategy_id }}">
             <input type="hidden" name="underlying" value="{{ selected_underlying }}">
             <input type="hidden" name="option_type" value="{{ selected_option_type }}">

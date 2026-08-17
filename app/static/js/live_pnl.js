@@ -25,7 +25,7 @@
     async function poll() {
         let data;
         try {
-            const res = await fetch('/dashboard/live-pnl', { headers: { Accept: 'application/json' } });
+            const res = await fetch((window.BASE_PATH || '') + '/dashboard/live-pnl', { headers: { Accept: 'application/json' } });
             if (!res.ok) return;
             data = await res.json();
         } catch (e) {
