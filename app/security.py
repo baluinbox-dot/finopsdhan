@@ -2,24 +2,41 @@
 
 Dhan access tokens are secrets equivalent to a login session for the user's
 brokerage account — they are never logged and never stored in plaintext.
+
+Uses the `bcrypt` package directly rather than passlib — passlib (last
+released 2020) breaks under bcrypt>=4.1 (its self-test assumes bcrypt's old,
+looser 72-byte handling), which forced pinning bcrypt to an exact old
+version. That old bcrypt then has no prebuilt wheel for newer Python
+releases and would need a Rust toolchain to build from source. Calling
+bcrypt directly sidesteps the whole problem — no passlib, no version pin
+tightrope.
 """
 
 from __future__ import annotations
 
+import bcrypt
 from cryptography.fernet import Fernet, InvalidToken
-from passlib.context import CryptContext
 
 from app.config import get_settings
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# bcrypt silently ignores any bytes beyond 72 — reject overlong passwords
+# explicitly at the call site instead (see app/routers/auth.py) rather than
+# let them be quietly truncated.
+_MAX_PASSWORD_BYTES = 72
 
 
 def hash_password(plain_password: str) -> str:
-    return pwd_context.hash(plain_password)
+    password_bytes = plain_password.encode("utf-8")[:_MAX_PASSWORD_BYTES]
+    return bcrypt.hashpw(password_bytes, bcrypt.gensalt()).decode("ascii")
 
 
 def verify_password(plain_password: str, password_hash: str) -> bool:
-    return pwd_context.verify(plain_password, password_hash)
+    password_bytes = plain_password.encode("utf-8")[:_MAX_PASSWORD_BYTES]
+    try:
+        return bcrypt.checkpw(password_bytes, password_hash.encode("ascii"))
+    except ValueError:
+        # Malformed/foreign hash format — never a valid match.
+        return False
 
 
 def _fernet() -> Fernet:

@@ -5,7 +5,7 @@
 
 {% if not has_dhan %}
 <div class="alert alert-warning">
-    Connect your Dhan account on the <a href="/settings/dhan">Settings page</a> before enabling a strategy.
+    Connect your Dhan account on the <a href="{{ url('/settings/dhan') }}">Settings page</a> before enabling a strategy.
 </div>
 {% endif %}
 
@@ -42,18 +42,18 @@
                                 </div>
                             </div>
                             <div class="mt-2">
-                                <a href="/strategies/{{ s.id }}/configure?user_strategy_id={{ inst.id }}" class="btn btn-outline-secondary btn-sm w-100 mb-1">Reconfigure</a>
+                                <a href="{{ url('/strategies/' ~ s.id ~ '/configure') }}?user_strategy_id={{ inst.id }}" class="btn btn-outline-secondary btn-sm w-100 mb-1">Reconfigure</a>
                                 <div class="d-flex gap-2">
                                     {% if inst.is_active %}
-                                    <form method="post" action="/strategies/instance/{{ inst.id }}/disable" class="flex-grow-1">
+                                    <form method="post" action="{{ url('/strategies/instance/' ~ inst.id ~ '/disable') }}" class="flex-grow-1">
                                         <button class="btn btn-outline-warning btn-sm w-100" type="submit">Pause</button>
                                     </form>
                                     {% else %}
-                                    <form method="post" action="/strategies/instance/{{ inst.id }}/resume" class="flex-grow-1">
+                                    <form method="post" action="{{ url('/strategies/instance/' ~ inst.id ~ '/resume') }}" class="flex-grow-1">
                                         <button class="btn btn-outline-success btn-sm w-100" type="submit" {{ 'disabled' if not has_dhan else '' }}>Resume</button>
                                     </form>
                                     {% endif %}
-                                    <form method="post" action="/strategies/instance/{{ inst.id }}/delete" class="flex-grow-1"
+                                    <form method="post" action="{{ url('/strategies/instance/' ~ inst.id ~ '/delete') }}" class="flex-grow-1"
                                           onsubmit="return confirm('Permanently delete {{ (inst.label or s.name) | replace("'", "") }}? This removes its order history too. If it has an open position, close it first.');">
                                         <button class="btn btn-outline-danger btn-sm w-100" type="submit">Delete</button>
                                     </form>
@@ -63,7 +63,7 @@
                         {% endfor %}
                     </div>
                     {% endif %}
-                    <a href="/strategies/{{ s.id }}/configure" class="btn btn-primary btn-sm w-100 {{ 'disabled' if not has_dhan else '' }}">
+                    <a href="{{ url('/strategies/' ~ s.id ~ '/configure') }}" class="btn btn-primary btn-sm w-100 {{ 'disabled' if not has_dhan else '' }}">
                         {{ '+ Add Another Instance' if instances else 'Configure →' }}
                     </a>
                 {% else %}
@@ -73,11 +73,11 @@
                     <span class="badge text-bg-success mb-2 align-self-start">
                         Active — {{ mine.mode.value }} mode
                     </span>
-                    <form method="post" action="/strategies/{{ s.id }}/disable">
+                    <form method="post" action="{{ url('/strategies/' ~ s.id ~ '/disable') }}">
                         <button class="btn btn-outline-danger btn-sm w-100" type="submit">Disable</button>
                     </form>
                     {% else %}
-                    <form method="post" action="/strategies/{{ s.id }}/enable" class="row g-2">
+                    <form method="post" action="{{ url('/strategies/' ~ s.id ~ '/enable') }}" class="row g-2">
                         <div class="col-6">
                             <label class="form-label small mb-0">Lots</label>
                             <input type="number" name="lots" value="1" min="1" class="form-control form-control-sm">

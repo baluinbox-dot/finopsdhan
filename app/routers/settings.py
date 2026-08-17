@@ -19,7 +19,7 @@ from app.dhan.client import validate_dhan_credentials
 from app.deps import CurrentUser, DbSession
 from app.models import DhanCredential
 from app.security import encrypt_secret
-from app.templating import flash, render
+from app.templating import flash, render, url
 
 router = APIRouter(prefix="/settings", tags=["settings"])
 
@@ -53,7 +53,7 @@ def dhan_connect(
         profile = validate_dhan_credentials(client_id, access_token)
     except Exception as exc:  # noqa: BLE001 — surface any SDK/network error to the user
         flash(request, f"Could not verify these Dhan credentials: {exc}", "error")
-        return RedirectResponse("/settings/dhan", status_code=303)
+        return RedirectResponse(url("/settings/dhan"), status_code=303)
 
     credential = current_user.dhan_credential
     if credential is None:
@@ -76,7 +76,7 @@ def dhan_connect(
     db.commit()
 
     flash(request, "Dhan account connected successfully.", "success")
-    return RedirectResponse("/settings/dhan", status_code=303)
+    return RedirectResponse(url("/settings/dhan"), status_code=303)
 
 
 @router.post("/dhan/test")
@@ -84,7 +84,7 @@ def dhan_test(request: Request, db: DbSession, current_user: CurrentUser):
     credential = current_user.dhan_credential
     if credential is None:
         flash(request, "No Dhan connection to test yet.", "error")
-        return RedirectResponse("/settings/dhan", status_code=303)
+        return RedirectResponse(url("/settings/dhan"), status_code=303)
 
     from app.security import decrypt_secret
 
@@ -93,7 +93,7 @@ def dhan_test(request: Request, db: DbSession, current_user: CurrentUser):
         profile = validate_dhan_credentials(credential.client_id, access_token)
     except Exception as exc:  # noqa: BLE001
         flash(request, f"Connection test failed: {exc}", "error")
-        return RedirectResponse("/settings/dhan", status_code=303)
+        return RedirectResponse(url("/settings/dhan"), status_code=303)
 
     credential.last_validated_at = datetime.now(timezone.utc)
     credential.last_profile_snapshot = {
@@ -107,7 +107,7 @@ def dhan_test(request: Request, db: DbSession, current_user: CurrentUser):
     db.commit()
 
     flash(request, "Connection is valid.", "success")
-    return RedirectResponse("/settings/dhan", status_code=303)
+    return RedirectResponse(url("/settings/dhan"), status_code=303)
 
 
 @router.post("/dhan/disconnect")
@@ -117,4 +117,4 @@ def dhan_disconnect(request: Request, db: DbSession, current_user: CurrentUser):
         db.delete(credential)
         db.commit()
     flash(request, "Dhan account disconnected.", "success")
-    return RedirectResponse("/settings/dhan", status_code=303)
+    return RedirectResponse(url("/settings/dhan"), status_code=303)

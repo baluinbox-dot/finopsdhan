@@ -12,7 +12,7 @@ from app.deps import CurrentUser, DbSession
 from app.engine.pnl import compute_live_pnl
 from app.engine.runner import find_open_run
 from app.models import Order, UserStrategy
-from app.templating import flash, render
+from app.templating import flash, render, url
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 
@@ -75,7 +75,7 @@ def pause_all(request: Request, db: DbSession, current_user: CurrentUser):
         us.is_active = False
     db.commit()
     flash(request, f"Paused {len(user_strategies)} active strategy(ies).", "success")
-    return RedirectResponse("/dashboard", status_code=303)
+    return RedirectResponse(url("/dashboard"), status_code=303)
 
 
 @router.post("/kill-switch")
@@ -84,7 +84,7 @@ def kill_switch(request: Request, db: DbSession, current_user: CurrentUser):
         user_dhan = get_user_dhan_client(db, current_user)
     except DhanNotConnectedError as exc:
         flash(request, str(exc), "error")
-        return RedirectResponse("/dashboard", status_code=303)
+        return RedirectResponse(url("/dashboard"), status_code=303)
 
     try:
         # Confirmed against dhan-oss/DhanHQ-py src/dhanhq/_trader_control.py:
@@ -97,4 +97,4 @@ def kill_switch(request: Request, db: DbSession, current_user: CurrentUser):
     except Exception as exc:  # noqa: BLE001
         flash(request, f"Kill switch call failed: {exc}", "error")
 
-    return RedirectResponse("/dashboard", status_code=303)
+    return RedirectResponse(url("/dashboard"), status_code=303)

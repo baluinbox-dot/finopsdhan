@@ -10,10 +10,25 @@ from zoneinfo import ZoneInfo
 from fastapi import Request
 from fastapi.templating import Jinja2Templates
 
+from app.config import get_settings
+
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 
 IST = ZoneInfo("Asia/Kolkata")
+
+
+def url(path: str) -> str:
+    """Prefix an absolute in-app path ("/dashboard", "/static/js/x.js", ...)
+    with the configured BASE_PATH. Empty locally (no-op); e.g. "/finopsdhan"
+    when hosted behind a reverse proxy under a path prefix. Every hardcoded
+    absolute path in a redirect or template link must go through this —
+    it's the one place that knows where this app is actually mounted."""
+    base = get_settings().base_path.rstrip("/")
+    return f"{base}{path}"
+
+
+templates.env.globals["url"] = url
 
 
 def to_ist(dt: datetime | None) -> datetime | None:
@@ -39,4 +54,5 @@ def render(request: Request, name: str, context: dict[str, Any] | None = None, *
     context = dict(context or {})
     context["flashes"] = request.session.pop("_flashes", [])
     context.setdefault("current_user", None)
+    context.setdefault("base_path", get_settings().base_path)
     return templates.TemplateResponse(request, name, context, **status_kwargs)

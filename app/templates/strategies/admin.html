@@ -16,12 +16,12 @@
                 <td>{% if s.is_published %}<span class="badge text-bg-success">Yes</span>{% else %}<span class="badge text-bg-secondary">No</span>{% endif %}</td>
                 <td>
                     <div class="d-flex gap-2">
-                        <form method="post" action="/strategies/admin/{{ s.id }}/toggle-publish">
+                        <form method="post" action="{{ url('/strategies/admin/' ~ s.id ~ '/toggle-publish') }}">
                             <button class="btn btn-sm btn-outline-primary" type="submit">
                                 {{ 'Unpublish' if s.is_published else 'Publish' }}
                             </button>
                         </form>
-                        <form method="post" action="/strategies/admin/{{ s.id }}/delete"
+                        <form method="post" action="{{ url('/strategies/admin/' ~ s.id ~ '/delete') }}"
                               onsubmit="return confirm('Permanently delete {{ (s.name) | replace("'", "") }} and every user\'s instance of it? This cannot be undone.');">
                             <button class="btn btn-sm btn-outline-danger" type="submit">Delete</button>
                         </form>
@@ -43,7 +43,7 @@
             <code>app/strategies/registry.py</code>. This form just creates the DB record
             users see and configure.
         </p>
-        <form method="post" action="/strategies/admin/create">
+        <form method="post" action="{{ url('/strategies/admin/create') }}">
             <div class="mb-3">
                 <label class="form-label">Display Name</label>
                 <input type="text" name="name" class="form-control" required>

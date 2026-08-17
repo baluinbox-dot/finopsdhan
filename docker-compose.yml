@@ -7,7 +7,8 @@ services:
       POSTGRES_PASSWORD: finops
       POSTGRES_DB: finopstrading
     ports:
-      - "5432:5432"
+      # Bound to localhost only — nothing outside this machine needs direct DB access.
+      - "127.0.0.1:${DB_HOST_PORT:-5432}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -26,7 +27,10 @@ services:
       db:
         condition: service_healthy
     ports:
-      - "8000:8000"
+      # Bound to localhost only — the host's web server (Apache/Nginx, whichever
+      # already owns port 80) reverse-proxies to this; the app is never exposed
+      # directly to the public internet.
+      - "127.0.0.1:${APP_HOST_PORT:-8000}:8000"
     volumes:
       - .:/app
 

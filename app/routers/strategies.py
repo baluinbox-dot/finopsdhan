@@ -17,7 +17,7 @@ from app.deps import CurrentUser, DbSession, SuperadminUser
 from app.engine.runner import close_user_strategy_now, find_open_run
 from app.models import Strategy, StrategyMode, UserStrategy
 from app.strategies.registry import RICH_CONFIG_STRATEGIES, STRATEGY_REGISTRY, get_strategy_class
-from app.templating import flash, render
+from app.templating import flash, render, url
 
 router = APIRouter(prefix="/strategies", tags=["strategies"])
 
@@ -63,11 +63,11 @@ def enable_strategy(
     strategy = db.get(Strategy, strategy_id)
     if strategy is None or not strategy.is_published:
         flash(request, "Strategy not found.", "error")
-        return RedirectResponse("/strategies", status_code=303)
+        return RedirectResponse(url("/strategies"), status_code=303)
 
     if not current_user.dhan_credential or not current_user.dhan_credential.is_active:
         flash(request, "Connect your Dhan account on the Settings page before enabling a strategy.", "error")
-        return RedirectResponse("/strategies", status_code=303)
+        return RedirectResponse(url("/strategies"), status_code=303)
 
     requested_mode = StrategyMode.LIVE if mode == "live" else StrategyMode.PAPER
     if requested_mode == StrategyMode.LIVE:
@@ -109,7 +109,7 @@ def enable_strategy(
     db.commit()
 
     flash(request, f"{strategy.name} enabled in {requested_mode.value} mode.", "success")
-    return RedirectResponse("/strategies", status_code=303)
+    return RedirectResponse(url("/strategies"), status_code=303)
 
 
 @router.get("/{strategy_id}/configure")
@@ -126,7 +126,7 @@ def configure_strategy_form(
     strategy = db.get(Strategy, strategy_id)
     if strategy is None or not strategy.is_published:
         flash(request, "Strategy not found.", "error")
-        return RedirectResponse("/strategies", status_code=303)
+        return RedirectResponse(url("/strategies"), status_code=303)
 
     # Editing an existing instance (came from "Reconfigure") vs a blank form
     # for a brand new one ("Add New Instance") — both live at this same URL,
@@ -139,7 +139,7 @@ def configure_strategy_form(
             existing = None
         if existing is None or existing.user_id != current_user.id or existing.strategy_id != strategy_id:
             flash(request, "Strategy instance not found.", "error")
-            return RedirectResponse("/strategies", status_code=303)
+            return RedirectResponse(url("/strategies"), status_code=303)
 
     existing_params = existing.params if existing else {}
     underlying = (underlying or existing_params.get("underlying") or "NIFTY").upper()
@@ -278,22 +278,22 @@ def configure_strategy_submit(
     strategy = db.get(Strategy, strategy_id)
     if strategy is None or not strategy.is_published:
         flash(request, "Strategy not found.", "error")
-        return RedirectResponse("/strategies", status_code=303)
+        return RedirectResponse(url("/strategies"), status_code=303)
 
     if not current_user.dhan_credential or not current_user.dhan_credential.is_active:
         flash(request, "Connect your Dhan account on the Settings page before enabling a strategy.", "error")
-        return RedirectResponse("/strategies", status_code=303)
+        return RedirectResponse(url("/strategies"), status_code=303)
 
     if underlying.upper() not in UNDERLYINGS:
         flash(request, "Unknown underlying.", "error")
-        return RedirectResponse(f"/strategies/{strategy_id}/configure", status_code=303)
+        return RedirectResponse(url(f"/strategies/{strategy_id}/configure"), status_code=303)
 
     if not expiry:
         flash(request, "Pick an expiry before saving.", "error")
         redirect_url = f"/strategies/{strategy_id}/configure?underlying={underlying}"
         if user_strategy_id:
             redirect_url += f"&user_strategy_id={user_strategy_id}"
-        return RedirectResponse(redirect_url, status_code=303)
+        return RedirectResponse(url(redirect_url), status_code=303)
 
     requested_mode = StrategyMode.LIVE if mode == "live" else StrategyMode.PAPER
     if requested_mode == StrategyMode.LIVE:
@@ -342,7 +342,7 @@ def configure_strategy_submit(
             existing = None
         if existing is None or existing.user_id != current_user.id or existing.strategy_id != strategy_id:
             flash(request, "Strategy instance not found.", "error")
-            return RedirectResponse("/strategies", status_code=303)
+            return RedirectResponse(url("/strategies"), status_code=303)
 
     strike_desc = (
         f"OTM{params['otm_level']}" if params["strike_selection_mode"] == "otm_level" else f"~₹{params['strike_premium_target']:.0f}"
@@ -368,7 +368,7 @@ def configure_strategy_submit(
     db.commit()
 
     flash(request, f"{final_label} configured and enabled in {requested_mode.value} mode.", "success")
-    return RedirectResponse("/strategies", status_code=303)
+    return RedirectResponse(url("/strategies"), status_code=303)
 
 
 @router.post("/instance/{user_strategy_id}/disable")
@@ -378,11 +378,11 @@ def disable_instance(request: Request, db: DbSession, current_user: CurrentUser,
     us = db.get(UserStrategy, user_strategy_id)
     if us is None or us.user_id != current_user.id:
         flash(request, "Strategy instance not found.", "error")
-        return RedirectResponse("/strategies", status_code=303)
+        return RedirectResponse(url("/strategies"), status_code=303)
     us.is_active = False
     db.commit()
     flash(request, f"{us.label or us.strategy.name} disabled.", "success")
-    return RedirectResponse("/strategies", status_code=303)
+    return RedirectResponse(url("/strategies"), status_code=303)
 
 
 @router.post("/instance/{user_strategy_id}/resume")
@@ -391,14 +391,14 @@ def resume_instance(request: Request, db: DbSession, current_user: CurrentUser, 
     us = db.get(UserStrategy, user_strategy_id)
     if us is None or us.user_id != current_user.id:
         flash(request, "Strategy instance not found.", "error")
-        return RedirectResponse("/strategies", status_code=303)
+        return RedirectResponse(url("/strategies"), status_code=303)
     if not current_user.dhan_credential or not current_user.dhan_credential.is_active:
         flash(request, "Connect your Dhan account on the Settings page before resuming a strategy.", "error")
-        return RedirectResponse("/strategies", status_code=303)
+        return RedirectResponse(url("/strategies"), status_code=303)
     us.is_active = True
     db.commit()
     flash(request, f"{us.label or us.strategy.name} resumed.", "success")
-    return RedirectResponse("/strategies", status_code=303)
+    return RedirectResponse(url("/strategies"), status_code=303)
 
 
 @router.post("/instance/{user_strategy_id}/delete")
@@ -409,17 +409,17 @@ def delete_instance(request: Request, db: DbSession, current_user: CurrentUser, 
     us = db.get(UserStrategy, user_strategy_id)
     if us is None or us.user_id != current_user.id:
         flash(request, "Strategy instance not found.", "error")
-        return RedirectResponse("/strategies", status_code=303)
+        return RedirectResponse(url("/strategies"), status_code=303)
 
     if find_open_run(us) is not None:
         flash(request, "Close the open position first (Close Now on the Dashboard) before deleting this instance.", "error")
-        return RedirectResponse("/strategies", status_code=303)
+        return RedirectResponse(url("/strategies"), status_code=303)
 
     label = us.label or us.strategy.name
     db.delete(us)
     db.commit()
     flash(request, f"{label} deleted.", "success")
-    return RedirectResponse("/strategies", status_code=303)
+    return RedirectResponse(url("/strategies"), status_code=303)
 
 
 @router.post("/{user_strategy_id}/close-now")
@@ -427,22 +427,22 @@ def close_now(request: Request, db: DbSession, current_user: CurrentUser, user_s
     user_strategy = db.get(UserStrategy, user_strategy_id)
     if user_strategy is None or user_strategy.user_id != current_user.id:
         flash(request, "Strategy instance not found.", "error")
-        return RedirectResponse("/dashboard", status_code=303)
+        return RedirectResponse(url("/dashboard"), status_code=303)
 
     try:
         closed = close_user_strategy_now(db, user_strategy)
     except DhanNotConnectedError as exc:
         flash(request, str(exc), "error")
-        return RedirectResponse("/dashboard", status_code=303)
+        return RedirectResponse(url("/dashboard"), status_code=303)
     except Exception as exc:  # noqa: BLE001
         flash(request, f"Could not close position: {exc}", "error")
-        return RedirectResponse("/dashboard", status_code=303)
+        return RedirectResponse(url("/dashboard"), status_code=303)
 
     if closed:
         flash(request, "Position closed — all legs, including any hedge, have been reversed.", "success")
     else:
         flash(request, "No open position to close.", "info")
-    return RedirectResponse("/dashboard", status_code=303)
+    return RedirectResponse(url("/dashboard"), status_code=303)
 
 
 @router.post("/{strategy_id}/disable")
@@ -456,7 +456,7 @@ def disable_strategy(request: Request, db: DbSession, current_user: CurrentUser,
         existing.is_active = False
         db.commit()
         flash(request, "Strategy disabled.", "success")
-    return RedirectResponse("/strategies", status_code=303)
+    return RedirectResponse(url("/strategies"), status_code=303)
 
 
 # --- Superadmin: publish/manage strategy definitions ---
@@ -490,13 +490,13 @@ def admin_create_strategy(
         get_strategy_class(code_ref)
     except ValueError as exc:
         flash(request, str(exc), "error")
-        return RedirectResponse("/strategies/admin", status_code=303)
+        return RedirectResponse(url("/strategies/admin"), status_code=303)
 
     try:
         default_params = json.loads(default_params_json or "{}")
     except json.JSONDecodeError:
         flash(request, "Default params must be valid JSON.", "error")
-        return RedirectResponse("/strategies/admin", status_code=303)
+        return RedirectResponse(url("/strategies/admin"), status_code=303)
 
     db.add(
         Strategy(
@@ -510,7 +510,7 @@ def admin_create_strategy(
     )
     db.commit()
     flash(request, "Strategy created (unpublished). Review and publish it below.", "success")
-    return RedirectResponse("/strategies/admin", status_code=303)
+    return RedirectResponse(url("/strategies/admin"), status_code=303)
 
 
 @router.post("/admin/{strategy_id}/toggle-publish")
@@ -520,7 +520,7 @@ def admin_toggle_publish(request: Request, db: DbSession, current_user: Superadm
         strategy.is_published = not strategy.is_published
         db.commit()
         flash(request, f"{strategy.name} is now {'published' if strategy.is_published else 'unpublished'}.", "success")
-    return RedirectResponse("/strategies/admin", status_code=303)
+    return RedirectResponse(url("/strategies/admin"), status_code=303)
 
 
 @router.post("/admin/{strategy_id}/delete")
@@ -531,7 +531,7 @@ def admin_delete_strategy(request: Request, db: DbSession, current_user: Superad
     strategy = db.get(Strategy, strategy_id)
     if strategy is None:
         flash(request, "Strategy not found.", "error")
-        return RedirectResponse("/strategies/admin", status_code=303)
+        return RedirectResponse(url("/strategies/admin"), status_code=303)
 
     instances = db.scalars(select(UserStrategy).where(UserStrategy.strategy_id == strategy_id)).all()
     for us in instances:
@@ -542,7 +542,7 @@ def admin_delete_strategy(request: Request, db: DbSession, current_user: Superad
                 f"{us.label or strategy.name}. It must be closed first.",
                 "error",
             )
-            return RedirectResponse("/strategies/admin", status_code=303)
+            return RedirectResponse(url("/strategies/admin"), status_code=303)
 
     name = strategy.name
     for us in instances:
@@ -552,4 +552,4 @@ def admin_delete_strategy(request: Request, db: DbSession, current_user: Superad
 
     suffix = f" and {len(instances)} user instance(s)" if instances else ""
     flash(request, f"{name} deleted{suffix}.", "success")
-    return RedirectResponse("/strategies/admin", status_code=303)
+    return RedirectResponse(url("/strategies/admin"), status_code=303)
