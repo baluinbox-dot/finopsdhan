@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block title %}Register — FinOps Dhan Algo{% endblock %}
+{% block content %}
+<div class="container-fluid vh-100 vh-lg-auto">
+    <div class="row min-vh-75 align-items-stretch">
+        <div class="col-md-6 d-none d-md-flex brand-panel rounded-4 align-items-center justify-content-center text-white p-5">
+            <div class="text-center">
+                <i class="bi bi-shield-lock" style="font-size: 3rem;"></i>
+                <h2 class="mt-3">Join FinOps Dhan Algo</h2>
+                <p class="mb-0">Your Dhan credentials stay encrypted and only ever used by your own strategies.</p>
+            </div>
+        </div>
+        <div class="col-md-6 col-12 d-flex align-items-center justify-content-center py-5">
+            <div class="w-100 px-3" style="max-width: 400px;">
+                <h4 class="mb-4">Create Account</h4>
+                <form method="post" action="/auth/register">
+                    <div class="mb-3">
+                        <label class="form-label">Email</label>
+                        <input type="email" name="email" class="form-control" required autofocus>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Password</label>
+                        <input type="password" name="password" class="form-control" minlength="8" required>
+                        <div class="form-text">At least 8 characters.</div>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Confirm Password</label>
+                        <input type="password" name="confirm_password" class="form-control" minlength="8" required>
+                    </div>
+                    <button id="registerBtn" type="submit" class="btn btn-primary w-100">Create Account</button>
+                </form>
+                <p class="mt-3 mb-0 small text-body-secondary">Already have an account? <a href="/auth/login">Log in</a>.</p>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

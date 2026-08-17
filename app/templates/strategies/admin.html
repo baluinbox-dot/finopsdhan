@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% block title %}Manage Strategies — FinOps Dhan Algo{% endblock %}
+{% block content %}
+<h4 class="mb-3">Manage Strategies (Superadmin)</h4>
+
+<div class="table-responsive mb-4">
+    <table class="table table-sm align-middle">
+        <thead>
+            <tr><th>Name</th><th>Code Ref</th><th>Published</th><th></th></tr>
+        </thead>
+        <tbody>
+            {% for s in strategies %}
+            <tr>
+                <td>{{ s.name }}<br><small class="text-body-secondary">{{ s.description }}</small></td>
+                <td><code>{{ s.code_ref }}</code></td>
+                <td>{% if s.is_published %}<span class="badge text-bg-success">Yes</span>{% else %}<span class="badge text-bg-secondary">No</span>{% endif %}</td>
+                <td>
+                    <form method="post" action="/strategies/admin/{{ s.id }}/toggle-publish">
+                        <button class="btn btn-sm btn-outline-primary" type="submit">
+                            {{ 'Unpublish' if s.is_published else 'Publish' }}
+                        </button>
+                    </form>
+                </td>
+            </tr>
+            {% else %}
+            <tr><td colspan="4" class="text-body-secondary">No strategies yet.</td></tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<div class="card stat-card" style="max-width: 600px;">
+    <div class="card-body">
+        <h5 class="card-title">Register a New Strategy</h5>
+        <p class="small text-body-secondary">
+            The code must already exist as a <code>Strategy</code> subclass registered in
+            <code>app/strategies/registry.py</code>. This form just creates the DB record
+            users see and configure.
+        </p>
+        <form method="post" action="/strategies/admin/create">
+            <div class="mb-3">
+                <label class="form-label">Display Name</label>
+                <input type="text" name="name" class="form-control" required>
+            </div>
+            <div class="mb-3">
+                <label class="form-label">Description</label>
+                <textarea name="description" class="form-control" rows="2"></textarea>
+            </div>
+            <div class="mb-3">
+                <label class="form-label">Code Ref</label>
+                <select name="code_ref" class="form-select" required>
+                    {% for key in registry_keys %}
+                    <option value="{{ key }}">{{ key }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="mb-3">
+                <label class="form-label">Default Params (JSON)</label>
+                <textarea name="default_params_json" class="form-control font-monospace" rows="4">{}</textarea>
+            </div>
+            <button class="btn btn-primary" type="submit">Create Strategy</button>
+        </form>
+    </div>
+</div>
+{% endblock %}

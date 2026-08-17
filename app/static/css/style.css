@@ -1,0 +1,19 @@
+body {
+    min-height: 100vh;
+}
+
+.brand-panel {
+    background: linear-gradient(135deg, #0d6efd, #084298);
+}
+
+.stat-card {
+    border-radius: 0.75rem;
+}
+
+.table-responsive {
+    -webkit-overflow-scrolling: touch;
+}
+
+@media (max-width: 576px) {
+    .btn { min-height: 44px; }
+}

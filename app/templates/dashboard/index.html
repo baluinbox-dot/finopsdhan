@@ -1,0 +1,135 @@
+{% extends "base.html" %}
+{% block title %}Dashboard — FinOps Dhan Algo{% endblock %}
+{% block content %}
+
+<div class="row g-3 mb-4">
+    <div class="col-6 col-md-3">
+        <div class="card stat-card text-center">
+            <div class="card-body">
+                <div class="fs-3 fw-bold">{{ active_count }}</div>
+                <div class="small text-body-secondary">Active Strategies</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-6 col-md-3">
+        <div class="card stat-card text-center">
+            <div class="card-body">
+                <div class="fs-3 fw-bold">{{ paper_count }}</div>
+                <div class="small text-body-secondary">Paper Orders (recent)</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-6 col-md-3">
+        <div class="card stat-card text-center">
+            <div class="card-body">
+                <div class="fs-3 fw-bold">{{ live_count }}</div>
+                <div class="small text-body-secondary">Live Orders (recent)</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-6 col-md-3">
+        <div class="card stat-card text-center">
+            <div class="card-body">
+                <div class="fs-3 fw-bold">
+                    {% if has_dhan %}<span class="text-success">Connected</span>{% else %}<span class="text-danger">Not Connected</span>{% endif %}
+                </div>
+                <div class="small text-body-secondary">Dhan Account</div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="d-flex flex-wrap gap-2 mb-4">
+    <form method="post" action="/dashboard/pause-all">
+        <button class="btn btn-outline-warning" type="submit" {{ 'disabled' if active_count == 0 else '' }}>
+            <i class="bi bi-pause-circle"></i> Pause All My Strategies
+        </button>
+    </form>
+    <form method="post" action="/dashboard/kill-switch" onsubmit="return confirm('This activates the Dhan account-level kill switch, blocking new orders on your Dhan account. Continue?');">
+        <button class="btn btn-outline-danger" type="submit" {{ 'disabled' if not has_dhan else '' }}>
+            <i class="bi bi-exclamation-octagon"></i> Dhan Kill Switch
+        </button>
+    </form>
+</div>
+
+<div class="d-flex justify-content-between align-items-center mb-3">
+    <h5 class="mb-0">My Strategies</h5>
+    <div class="small text-body-secondary" id="pnlStatus">
+        {% if open_run_ids %}
+        Live P&amp;L: <span id="totalPnl" class="fw-bold">—</span>
+        <span id="pnlSpinner" class="spinner-border spinner-border-sm ms-1" role="status"></span>
+        {% endif %}
+    </div>
+</div>
+<div class="table-responsive mb-4">
+    <table class="table table-sm align-middle">
+        <thead><tr><th>Strategy</th><th>Mode</th><th>Status</th><th>Position</th><th>Live P&amp;L</th><th>Params</th><th></th></tr></thead>
+        <tbody>
+        {% for us in user_strategies %}
+            <tr>
+                <td>
+                    {{ us.label or us.strategy.name }}
+                    {% if us.label %}<div class="small text-body-secondary">{{ us.strategy.name }}</div>{% endif %}
+                </td>
+                <td>{{ us.mode.value }}</td>
+                <td>{% if us.is_active %}<span class="badge text-bg-success">Active</span>{% else %}<span class="badge text-bg-secondary">Inactive</span>{% endif %}</td>
+                <td>
+                    {% if us.id in open_run_ids %}
+                    <span class="badge text-bg-warning">Open</span>
+                    {% else %}
+                    <span class="badge text-bg-secondary">Flat</span>
+                    {% endif %}
+                </td>
+                <td>
+                    {% if us.id in open_run_ids %}
+                    <span data-pnl-cell="{{ us.id }}" class="fw-semibold text-body-secondary">loading…</span>
+                    {% else %}
+                    <span class="text-body-secondary">—</span>
+                    {% endif %}
+                </td>
+                <td class="small text-body-secondary">{{ us.params }}</td>
+                <td>
+                    {% if us.id in open_run_ids %}
+                    <form method="post" action="/strategies/{{ us.id }}/close-now" onsubmit="return confirm('Close this position now — all legs, including any hedge?');">
+                        <button class="btn btn-sm btn-outline-danger" type="submit">Close Now</button>
+                    </form>
+                    {% endif %}
+                </td>
+            </tr>
+        {% else %}
+            <tr><td colspan="7" class="text-body-secondary">No strategies enabled yet — visit <a href="/strategies">Strategies</a>.</td></tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<h5 class="mb-3">Recent Orders</h5>
+<div class="table-responsive">
+    <table class="table table-sm align-middle">
+        <thead>
+            <tr><th>Time</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Price</th><th>Type</th><th>Status</th></tr>
+        </thead>
+        <tbody>
+        {% for o in recent_orders %}
+            <tr>
+                <td class="small">{{ (o.placed_at | to_ist).strftime('%d %b, %H:%M') }} IST</td>
+                <td>{{ o.trading_symbol or o.security_id }}</td>
+                <td>{{ o.transaction_type }}</td>
+                <td>{{ o.quantity }}</td>
+                <td>{{ '%.2f'|format(o.price) }}</td>
+                <td>{% if o.is_paper %}<span class="badge text-bg-info">Paper</span>{% else %}<span class="badge text-bg-dark">Live</span>{% endif %}</td>
+                <td>{{ o.status.value }}</td>
+            </tr>
+        {% else %}
+            <tr><td colspan="7" class="text-body-secondary">No orders yet.</td></tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}
+
+{% block scripts %}
+{% if open_run_ids %}
+<script src="/static/js/live_pnl.js"></script>
+{% endif %}
+{% endblock %}

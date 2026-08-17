@@ -1,0 +1,523 @@
+"""Strategy catalog: superadmin publishes strategies, users enable/configure
+their own instance of a published strategy against their connected Dhan
+account."""
+
+from __future__ import annotations
+
+import json
+import uuid
+
+from fastapi import APIRouter, Form, Request
+from fastapi.responses import RedirectResponse
+from sqlalchemy import select
+
+from app.dhan.client import DhanNotConnectedError, get_user_dhan_client
+from app.dhan.helpers import UNDERLYINGS, fetch_chain_df, get_lot_size, list_expiries
+from app.deps import CurrentUser, DbSession, SuperadminUser
+from app.engine.runner import close_user_strategy_now, find_open_run
+from app.models import Strategy, StrategyMode, UserStrategy
+from app.strategies.registry import RICH_CONFIG_STRATEGIES, STRATEGY_REGISTRY, get_strategy_class
+from app.templating import flash, render
+
+router = APIRouter(prefix="/strategies", tags=["strategies"])
+
+
+@router.get("")
+def list_strategies(request: Request, db: DbSession, current_user: CurrentUser):
+    published = db.scalars(select(Strategy).where(Strategy.is_published == True)).all()  # noqa: E712
+
+    # A user may run several instances of the *same* strategy concurrently
+    # (e.g. a CE seller and a PE seller both active at once) — group by
+    # strategy_id rather than assuming exactly one.
+    my_instances: dict[uuid.UUID, list[UserStrategy]] = {}
+    for us in db.scalars(select(UserStrategy).where(UserStrategy.user_id == current_user.id)):
+        my_instances.setdefault(us.strategy_id, []).append(us)
+
+    has_dhan = current_user.dhan_credential is not None and current_user.dhan_credential.is_active
+
+    return render(
+        request,
+        "strategies/list.html",
+        {
+            "current_user": current_user,
+            "strategies": published,
+            "my_instances": my_instances,
+            "has_dhan": has_dhan,
+            "rich_config_strategies": RICH_CONFIG_STRATEGIES,
+        },
+    )
+
+
+@router.post("/{strategy_id}/enable")
+def enable_strategy(
+    request: Request,
+    db: DbSession,
+    current_user: CurrentUser,
+    strategy_id: uuid.UUID,
+    lots: int = Form(1),
+    strike_offset_points: int = Form(200),
+    stop_loss_pct: int = Form(30),
+    target_pct: int = Form(50),
+    mode: str = Form("paper"),
+):
+    strategy = db.get(Strategy, strategy_id)
+    if strategy is None or not strategy.is_published:
+        flash(request, "Strategy not found.", "error")
+        return RedirectResponse("/strategies", status_code=303)
+
+    if not current_user.dhan_credential or not current_user.dhan_credential.is_active:
+        flash(request, "Connect your Dhan account on the Settings page before enabling a strategy.", "error")
+        return RedirectResponse("/strategies", status_code=303)
+
+    requested_mode = StrategyMode.LIVE if mode == "live" else StrategyMode.PAPER
+    if requested_mode == StrategyMode.LIVE:
+        flash(
+            request,
+            "Live trading isn't enabled from this screen yet — the strategy has been "
+            "turned on in paper mode instead. Live mode requires a separate explicit "
+            "confirmation step.",
+            "warning",
+        )
+        requested_mode = StrategyMode.PAPER
+
+    params = {
+        "lots": lots,
+        "strike_offset_points": strike_offset_points,
+        "stop_loss_pct": stop_loss_pct,
+        "target_pct": target_pct,
+    }
+
+    existing = db.scalar(
+        select(UserStrategy).where(
+            UserStrategy.user_id == current_user.id, UserStrategy.strategy_id == strategy_id
+        )
+    )
+    if existing:
+        existing.params = params
+        existing.mode = requested_mode
+        existing.is_active = True
+    else:
+        db.add(
+            UserStrategy(
+                user_id=current_user.id,
+                strategy_id=strategy_id,
+                params=params,
+                mode=requested_mode,
+                is_active=True,
+            )
+        )
+    db.commit()
+
+    flash(request, f"{strategy.name} enabled in {requested_mode.value} mode.", "success")
+    return RedirectResponse("/strategies", status_code=303)
+
+
+@router.get("/{strategy_id}/configure")
+def configure_strategy_form(
+    request: Request,
+    db: DbSession,
+    current_user: CurrentUser,
+    strategy_id: uuid.UUID,
+    user_strategy_id: str = "",
+    underlying: str = "",
+    option_type: str = "",
+    expiry: str = "",
+):
+    strategy = db.get(Strategy, strategy_id)
+    if strategy is None or not strategy.is_published:
+        flash(request, "Strategy not found.", "error")
+        return RedirectResponse("/strategies", status_code=303)
+
+    # Editing an existing instance (came from "Reconfigure") vs a blank form
+    # for a brand new one ("Add New Instance") — both live at this same URL,
+    # distinguished by whether user_strategy_id was passed.
+    existing: UserStrategy | None = None
+    if user_strategy_id:
+        try:
+            existing = db.get(UserStrategy, uuid.UUID(user_strategy_id))
+        except ValueError:
+            existing = None
+        if existing is None or existing.user_id != current_user.id or existing.strategy_id != strategy_id:
+            flash(request, "Strategy instance not found.", "error")
+            return RedirectResponse("/strategies", status_code=303)
+
+    existing_params = existing.params if existing else {}
+    underlying = (underlying or existing_params.get("underlying") or "NIFTY").upper()
+    if underlying not in UNDERLYINGS:
+        underlying = "NIFTY"
+    option_type = (option_type or existing_params.get("option_type") or "CE").upper()
+    if option_type not in ("CE", "PE"):
+        option_type = "CE"
+    if not expiry:
+        expiry = existing_params.get("expiry") or ""
+
+    has_dhan = current_user.dhan_credential is not None and current_user.dhan_credential.is_active
+
+    expiries: list[str] = []
+    expiry_error: str | None = None
+    otm_preview: list[dict] = []
+    selected_expiry = expiry
+
+    if has_dhan:
+        try:
+            user_dhan = get_user_dhan_client(db, current_user)
+            expiries = list_expiries(user_dhan.client, underlying)
+        except DhanNotConnectedError as exc:
+            expiry_error = str(exc)
+        except Exception as exc:  # noqa: BLE001 — surface any SDK/network error, don't crash the page
+            expiry_error = f"Could not fetch expiries from Dhan: {exc}"
+
+        if not selected_expiry and expiries:
+            selected_expiry = expiries[0]  # default to nearest on first load
+
+        if selected_expiry and selected_expiry in expiries:
+            try:
+                meta = UNDERLYINGS[underlying]
+                chain_df, spot = fetch_chain_df(
+                    user_dhan.client,
+                    under_security_id=meta["security_id"],
+                    expiry=selected_expiry,
+                    under_exchange_segment=meta["exchange_segment"],
+                )
+                if not chain_df.empty:
+                    strikes = sorted(chain_df["strike"].tolist())
+                    atm_strike = min(strikes, key=lambda x: abs(x - spot))
+                    atm_index = strikes.index(atm_strike)
+                    price_col = "ce_ltp" if option_type == "CE" else "pe_ltp"
+                    sid_col = "ce_security_id" if option_type == "CE" else "pe_security_id"
+                    # Negative = ITM, 0 = ATM, positive = OTM — matches the
+                    # strategy's own step = level if CE else -level math
+                    # exactly, so no separate ITM/OTM code path is needed.
+                    for level in range(-3, 11):
+                        idx = atm_index + (level if option_type == "CE" else -level)
+                        if 0 <= idx < len(strikes):
+                            row = chain_df[chain_df["strike"] == strikes[idx]].iloc[0]
+                            lot_size = get_lot_size(security_id=row.get(sid_col)) if row.get(sid_col) else None
+                            strike_label = "ATM" if level == 0 else (f"ITM{-level}" if level < 0 else f"OTM{level}")
+                            otm_preview.append(
+                                {
+                                    "level": level,
+                                    "strike_label": strike_label,
+                                    "strike": strikes[idx],
+                                    "premium": row.get(price_col),
+                                    "lot_size": lot_size,
+                                }
+                            )
+            except Exception as exc:  # noqa: BLE001 — preview is a nice-to-have, never block the form
+                expiry_error = expiry_error or f"Could not fetch live strikes: {exc}"
+
+    # Merge order matters: the *class's* default_params is the authoritative
+    # structural shape (always has every nested key) — the DB row's own
+    # default_params (admin-tunable, may be partial or empty) layers on top,
+    # then this user's saved params (which may predate a shape change, e.g.
+    # an older flat stop-loss config) layers on last.
+    try:
+        strategy_cls = get_strategy_class(strategy.code_ref)
+        class_defaults = strategy_cls.default_params
+    except ValueError:
+        class_defaults = {}
+    params = {**class_defaults, **strategy.default_params, **existing_params}
+    # Reflect the dropdowns' current selection, not necessarily the saved value.
+    params["underlying"] = underlying
+    params["option_type"] = option_type
+
+    return render(
+        request,
+        "strategies/configure_single_leg_hedge.html",
+        {
+            "current_user": current_user,
+            "user_strategy_id": user_strategy_id,
+            "strategy": strategy,
+            "has_dhan": has_dhan,
+            "underlyings": UNDERLYINGS,
+            "selected_underlying": underlying,
+            "selected_option_type": option_type,
+            "selected_expiry": selected_expiry,
+            "expiries": expiries,
+            "expiry_error": expiry_error,
+            "otm_preview": otm_preview,
+            "params": params,
+            "existing": existing,
+        },
+    )
+
+
+@router.post("/{strategy_id}/configure")
+def configure_strategy_submit(
+    request: Request,
+    db: DbSession,
+    current_user: CurrentUser,
+    strategy_id: uuid.UUID,
+    user_strategy_id: str = Form(""),
+    label: str = Form(""),
+    underlying: str = Form(...),
+    option_type: str = Form(...),
+    strike_selection_mode: str = Form("otm_level"),
+    otm_level: int = Form(1),
+    strike_premium_target: float = Form(0),
+    expiry: str = Form(...),
+    lots: int = Form(1),
+    sl_premium_pct_enabled: bool = Form(False),
+    sl_premium_pct_value: float = Form(30),
+    sl_premium_abs_enabled: bool = Form(False),
+    sl_premium_abs_value: float = Form(0),
+    sl_spot_enabled: bool = Form(False),
+    sl_spot_value: float = Form(0),
+    target_premium_pct_enabled: bool = Form(False),
+    target_premium_pct_value: float = Form(50),
+    target_premium_abs_enabled: bool = Form(False),
+    target_premium_abs_value: float = Form(0),
+    target_spot_enabled: bool = Form(False),
+    target_spot_value: float = Form(0),
+    hedge_enabled: bool = Form(False),
+    hedge_premium_target: float = Form(0),
+    window_start: str = Form("09:15"),
+    window_end: str = Form("15:15"),
+    mode: str = Form("paper"),
+):
+    strategy = db.get(Strategy, strategy_id)
+    if strategy is None or not strategy.is_published:
+        flash(request, "Strategy not found.", "error")
+        return RedirectResponse("/strategies", status_code=303)
+
+    if not current_user.dhan_credential or not current_user.dhan_credential.is_active:
+        flash(request, "Connect your Dhan account on the Settings page before enabling a strategy.", "error")
+        return RedirectResponse("/strategies", status_code=303)
+
+    if underlying.upper() not in UNDERLYINGS:
+        flash(request, "Unknown underlying.", "error")
+        return RedirectResponse(f"/strategies/{strategy_id}/configure", status_code=303)
+
+    if not expiry:
+        flash(request, "Pick an expiry before saving.", "error")
+        redirect_url = f"/strategies/{strategy_id}/configure?underlying={underlying}"
+        if user_strategy_id:
+            redirect_url += f"&user_strategy_id={user_strategy_id}"
+        return RedirectResponse(redirect_url, status_code=303)
+
+    requested_mode = StrategyMode.LIVE if mode == "live" else StrategyMode.PAPER
+    if requested_mode == StrategyMode.LIVE:
+        flash(
+            request,
+            "Live trading isn't enabled from this screen yet — the strategy has been "
+            "turned on in paper mode instead. Live mode requires a separate explicit "
+            "confirmation step.",
+            "warning",
+        )
+        requested_mode = StrategyMode.PAPER
+
+    params = {
+        "underlying": underlying.upper(),
+        "option_type": option_type.upper(),
+        "strike_selection_mode": strike_selection_mode if strike_selection_mode == "premium_closest" else "otm_level",
+        "otm_level": otm_level,
+        "strike_premium_target": strike_premium_target,
+        "expiry": expiry,
+        "lots": lots,
+        "stop_loss": {
+            "premium_pct": {"enabled": sl_premium_pct_enabled, "value": sl_premium_pct_value},
+            "premium_abs": {"enabled": sl_premium_abs_enabled, "value": sl_premium_abs_value},
+            "spot_level": {"enabled": sl_spot_enabled, "value": sl_spot_value},
+        },
+        "target": {
+            "premium_pct": {"enabled": target_premium_pct_enabled, "value": target_premium_pct_value},
+            "premium_abs": {"enabled": target_premium_abs_enabled, "value": target_premium_abs_value},
+            "spot_level": {"enabled": target_spot_enabled, "value": target_spot_value},
+        },
+        "hedge_enabled": hedge_enabled,
+        "hedge_premium_target": hedge_premium_target,
+        "window_start": window_start,
+        "window_end": window_end,
+    }
+
+    # Editing an existing instance (user_strategy_id was passed, e.g. from
+    # "Reconfigure") updates it in place; otherwise this always creates a
+    # brand new instance — a user can run several instances of the same
+    # strategy concurrently (e.g. a CE seller and a PE seller both active).
+    existing: UserStrategy | None = None
+    if user_strategy_id:
+        try:
+            existing = db.get(UserStrategy, uuid.UUID(user_strategy_id))
+        except ValueError:
+            existing = None
+        if existing is None or existing.user_id != current_user.id or existing.strategy_id != strategy_id:
+            flash(request, "Strategy instance not found.", "error")
+            return RedirectResponse("/strategies", status_code=303)
+
+    strike_desc = (
+        f"OTM{params['otm_level']}" if params["strike_selection_mode"] == "otm_level" else f"~₹{params['strike_premium_target']:.0f}"
+    )
+    final_label = label.strip() or f"{params['option_type']} {strike_desc} {params['underlying']}"
+
+    if existing:
+        existing.label = final_label
+        existing.params = params
+        existing.mode = requested_mode
+        existing.is_active = True
+    else:
+        db.add(
+            UserStrategy(
+                user_id=current_user.id,
+                strategy_id=strategy_id,
+                label=final_label,
+                params=params,
+                mode=requested_mode,
+                is_active=True,
+            )
+        )
+    db.commit()
+
+    flash(request, f"{final_label} configured and enabled in {requested_mode.value} mode.", "success")
+    return RedirectResponse("/strategies", status_code=303)
+
+
+@router.post("/instance/{user_strategy_id}/disable")
+def disable_instance(request: Request, db: DbSession, current_user: CurrentUser, user_strategy_id: uuid.UUID):
+    """Pause one specific instance — does not touch any other instance of
+    the same (or a different) strategy this user has running."""
+    us = db.get(UserStrategy, user_strategy_id)
+    if us is None or us.user_id != current_user.id:
+        flash(request, "Strategy instance not found.", "error")
+        return RedirectResponse("/strategies", status_code=303)
+    us.is_active = False
+    db.commit()
+    flash(request, f"{us.label or us.strategy.name} disabled.", "success")
+    return RedirectResponse("/strategies", status_code=303)
+
+
+@router.post("/instance/{user_strategy_id}/resume")
+def resume_instance(request: Request, db: DbSession, current_user: CurrentUser, user_strategy_id: uuid.UUID):
+    """Reactivate a previously disabled instance with its existing params."""
+    us = db.get(UserStrategy, user_strategy_id)
+    if us is None or us.user_id != current_user.id:
+        flash(request, "Strategy instance not found.", "error")
+        return RedirectResponse("/strategies", status_code=303)
+    if not current_user.dhan_credential or not current_user.dhan_credential.is_active:
+        flash(request, "Connect your Dhan account on the Settings page before resuming a strategy.", "error")
+        return RedirectResponse("/strategies", status_code=303)
+    us.is_active = True
+    db.commit()
+    flash(request, f"{us.label or us.strategy.name} resumed.", "success")
+    return RedirectResponse("/strategies", status_code=303)
+
+
+@router.post("/instance/{user_strategy_id}/delete")
+def delete_instance(request: Request, db: DbSession, current_user: CurrentUser, user_strategy_id: uuid.UUID):
+    """Permanently remove one instance and its run/order history. Blocked
+    while a position is open — close it first so it doesn't vanish
+    unresolved."""
+    us = db.get(UserStrategy, user_strategy_id)
+    if us is None or us.user_id != current_user.id:
+        flash(request, "Strategy instance not found.", "error")
+        return RedirectResponse("/strategies", status_code=303)
+
+    if find_open_run(us) is not None:
+        flash(request, "Close the open position first (Close Now on the Dashboard) before deleting this instance.", "error")
+        return RedirectResponse("/strategies", status_code=303)
+
+    label = us.label or us.strategy.name
+    db.delete(us)
+    db.commit()
+    flash(request, f"{label} deleted.", "success")
+    return RedirectResponse("/strategies", status_code=303)
+
+
+@router.post("/{user_strategy_id}/close-now")
+def close_now(request: Request, db: DbSession, current_user: CurrentUser, user_strategy_id: uuid.UUID):
+    user_strategy = db.get(UserStrategy, user_strategy_id)
+    if user_strategy is None or user_strategy.user_id != current_user.id:
+        flash(request, "Strategy instance not found.", "error")
+        return RedirectResponse("/dashboard", status_code=303)
+
+    try:
+        closed = close_user_strategy_now(db, user_strategy)
+    except DhanNotConnectedError as exc:
+        flash(request, str(exc), "error")
+        return RedirectResponse("/dashboard", status_code=303)
+    except Exception as exc:  # noqa: BLE001
+        flash(request, f"Could not close position: {exc}", "error")
+        return RedirectResponse("/dashboard", status_code=303)
+
+    if closed:
+        flash(request, "Position closed — all legs, including any hedge, have been reversed.", "success")
+    else:
+        flash(request, "No open position to close.", "info")
+    return RedirectResponse("/dashboard", status_code=303)
+
+
+@router.post("/{strategy_id}/disable")
+def disable_strategy(request: Request, db: DbSession, current_user: CurrentUser, strategy_id: uuid.UUID):
+    existing = db.scalar(
+        select(UserStrategy).where(
+            UserStrategy.user_id == current_user.id, UserStrategy.strategy_id == strategy_id
+        )
+    )
+    if existing:
+        existing.is_active = False
+        db.commit()
+        flash(request, "Strategy disabled.", "success")
+    return RedirectResponse("/strategies", status_code=303)
+
+
+# --- Superadmin: publish/manage strategy definitions ---
+
+
+@router.get("/admin")
+def admin_strategies(request: Request, db: DbSession, current_user: SuperadminUser):
+    all_strategies = db.scalars(select(Strategy)).all()
+    return render(
+        request,
+        "strategies/admin.html",
+        {
+            "current_user": current_user,
+            "strategies": all_strategies,
+            "registry_keys": list(STRATEGY_REGISTRY.keys()),
+        },
+    )
+
+
+@router.post("/admin/create")
+def admin_create_strategy(
+    request: Request,
+    db: DbSession,
+    current_user: SuperadminUser,
+    name: str = Form(...),
+    description: str = Form(""),
+    code_ref: str = Form(...),
+    default_params_json: str = Form("{}"),
+):
+    try:
+        get_strategy_class(code_ref)
+    except ValueError as exc:
+        flash(request, str(exc), "error")
+        return RedirectResponse("/strategies/admin", status_code=303)
+
+    try:
+        default_params = json.loads(default_params_json or "{}")
+    except json.JSONDecodeError:
+        flash(request, "Default params must be valid JSON.", "error")
+        return RedirectResponse("/strategies/admin", status_code=303)
+
+    db.add(
+        Strategy(
+            name=name,
+            description=description,
+            code_ref=code_ref,
+            config_schema={},
+            default_params=default_params,
+            is_published=False,
+        )
+    )
+    db.commit()
+    flash(request, "Strategy created (unpublished). Review and publish it below.", "success")
+    return RedirectResponse("/strategies/admin", status_code=303)
+
+
+@router.post("/admin/{strategy_id}/toggle-publish")
+def admin_toggle_publish(request: Request, db: DbSession, current_user: SuperadminUser, strategy_id: uuid.UUID):
+    strategy = db.get(Strategy, strategy_id)
+    if strategy:
+        strategy.is_published = not strategy.is_published
+        db.commit()
+        flash(request, f"{strategy.name} is now {'published' if strategy.is_published else 'unpublished'}.", "success")
+    return RedirectResponse("/strategies/admin", status_code=303)

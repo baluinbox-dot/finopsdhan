@@ -1,0 +1,227 @@
+{% extends "base.html" %}
+{% block title %}Configure {{ strategy.name }} — FinOps Dhan Algo{% endblock %}
+{% block content %}
+<h4 class="mb-1">{{ 'Reconfigure: ' ~ (existing.label or strategy.name) if existing else 'Add New Instance: ' ~ strategy.name }}</h4>
+<p class="text-body-secondary">{{ strategy.description }}</p>
+{% if not existing %}
+<p class="small text-body-secondary">
+    This creates a <strong>new, independent instance</strong> — any other instances of this strategy you
+    already have running (e.g. a CE seller) keep running untouched.
+</p>
+{% endif %}
+
+{% if not has_dhan %}
+<div class="alert alert-warning">
+    Connect your Dhan account on the <a href="/settings/dhan">Settings page</a> before configuring this strategy —
+    the expiry and strike info below is fetched live from your own Dhan connection.
+</div>
+{% else %}
+
+<div class="card stat-card mb-3" style="max-width: 720px;">
+    <div class="card-body">
+        <form method="get" action="/strategies/{{ strategy.id }}/configure" class="row g-2 align-items-end">
+            <input type="hidden" name="user_strategy_id" value="{{ user_strategy_id }}">
+            <div class="col-auto">
+                <label class="form-label small mb-0">Underlying</label>
+                <select name="underlying" class="form-select form-select-sm" onchange="this.form.submit()">
+                    {% for key, meta in underlyings.items() %}
+                    <option value="{{ key }}" {{ 'selected' if key == selected_underlying else '' }}>{{ meta.label }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-auto">
+                <label class="form-label small mb-0">Option Type</label>
+                <select name="option_type" class="form-select form-select-sm" onchange="this.form.submit()">
+                    <option value="CE" {{ 'selected' if selected_option_type == 'CE' else '' }}>CE (Call)</option>
+                    <option value="PE" {{ 'selected' if selected_option_type == 'PE' else '' }}>PE (Put)</option>
+                </select>
+            </div>
+            <div class="col-auto">
+                <label class="form-label small mb-0">Expiry</label>
+                <select name="expiry" class="form-select form-select-sm" onchange="this.form.submit()" {{ 'disabled' if not expiries else '' }}>
+                    {% for exp in expiries %}
+                    <option value="{{ exp }}" {{ 'selected' if exp == selected_expiry else '' }}>{{ exp }}</option>
+                    {% else %}
+                    <option>No expiries available</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-auto">
+                <button class="btn btn-outline-secondary btn-sm" type="submit">Refresh Strikes</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+{% if expiry_error %}
+<div class="alert alert-danger">{{ expiry_error }}</div>
+{% endif %}
+
+<div class="card stat-card" style="max-width: 720px;">
+    <div class="card-body">
+        <form method="post" action="/strategies/{{ strategy.id }}/configure" class="row g-3">
+            <input type="hidden" name="user_strategy_id" value="{{ user_strategy_id }}">
+            <input type="hidden" name="underlying" value="{{ selected_underlying }}">
+            <input type="hidden" name="option_type" value="{{ selected_option_type }}">
+            <input type="hidden" name="expiry" value="{{ selected_expiry }}">
+
+            <div class="col-12">
+                <div class="small text-body-secondary mb-1">
+                    {{ underlyings[selected_underlying].label }} · {{ selected_option_type }} · {{ selected_expiry or 'no expiry selected' }}
+                </div>
+            </div>
+
+            <div class="col-12">
+                <label class="form-label">Instance Name</label>
+                <input type="text" name="label" value="{{ existing.label if existing else '' }}" maxlength="120"
+                       class="form-control" placeholder="e.g. CE Seller — auto-generated if left blank">
+                <div class="form-text">How this instance is labeled on the dashboard, so you can tell it apart from others.</div>
+            </div>
+
+            <div class="col-12">
+                <label class="form-label mb-1">Strike Selection</label>
+            </div>
+
+            <div class="col-md-6">
+                <div class="form-check mb-2">
+                    <input type="radio" class="form-check-input" id="modeOtm" name="strike_selection_mode" value="otm_level"
+                           {{ 'checked' if params.strike_selection_mode != 'premium_closest' else '' }}>
+                    <label class="form-check-label fw-semibold" for="modeOtm">By ITM/ATM/OTM Level</label>
+                </div>
+                <select name="otm_level" class="form-select">
+                    {% if otm_preview %}
+                    {% for opt in otm_preview %}
+                    <option value="{{ opt.level }}" {{ 'selected' if params.otm_level == opt.level else '' }}>
+                        {{ opt.strike_label }} — Strike {{ opt.strike | int }} @ ₹{{ '%.2f'|format(opt.premium or 0) }}{% if opt.lot_size %} (lot {{ opt.lot_size }}){% endif %}
+                    </option>
+                    {% endfor %}
+                    {% else %}
+                    {% for lvl in [-3, -2, -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10] %}
+                    <option value="{{ lvl }}" {{ 'selected' if params.otm_level == lvl else '' }}>
+                        {{ 'ATM' if lvl == 0 else ('ITM' ~ -lvl if lvl < 0 else 'OTM' ~ lvl) }}
+                    </option>
+                    {% endfor %}
+                    {% endif %}
+                </select>
+            </div>
+
+            <div class="col-md-6">
+                <div class="form-check mb-2">
+                    <input type="radio" class="form-check-input" id="modePremium" name="strike_selection_mode" value="premium_closest"
+                           {{ 'checked' if params.strike_selection_mode == 'premium_closest' else '' }}>
+                    <label class="form-check-label fw-semibold" for="modePremium">By Closest Premium</label>
+                </div>
+                <div class="input-group">
+                    <span class="input-group-text">₹</span>
+                    <input type="number" step="0.01" name="strike_premium_target" value="{{ params.strike_premium_target }}" class="form-control" placeholder="e.g. 50">
+                </div>
+            </div>
+
+            <div class="col-12 small text-body-secondary">
+                Pick the radio for whichever method you want to use — the other field is ignored. "Closest
+                Premium" finds whichever strike's live premium is nearest the price you enter (same idea as
+                the hedge picker below). Either way, the strike is re-resolved fresh at the moment of entry,
+                since spot moves.
+            </div>
+
+            <div class="col-md-6">
+                <label class="form-label">Lots</label>
+                <input type="number" name="lots" min="1" value="{{ params.lots }}" class="form-control">
+            </div>
+
+            <div class="col-12"><hr></div>
+
+            <div class="col-md-6">
+                <label class="form-label">Stop-Loss <span class="text-body-secondary small">(any checked condition, whichever hits first)</span></label>
+                <div class="form-check d-flex align-items-center gap-2 mb-1">
+                    <input type="checkbox" class="form-check-input" name="sl_premium_pct_enabled" value="true"
+                           {{ 'checked' if params.stop_loss.premium_pct.enabled else '' }}>
+                    <label class="form-check-label flex-shrink-0">% of premium ≥</label>
+                    <input type="number" step="0.01" name="sl_premium_pct_value" value="{{ params.stop_loss.premium_pct.value }}" class="form-control form-control-sm">
+                </div>
+                <div class="form-check d-flex align-items-center gap-2 mb-1">
+                    <input type="checkbox" class="form-check-input" name="sl_premium_abs_enabled" value="true"
+                           {{ 'checked' if params.stop_loss.premium_abs.enabled else '' }}>
+                    <label class="form-check-label flex-shrink-0">Premium (₹) reaches</label>
+                    <input type="number" step="0.01" name="sl_premium_abs_value" value="{{ params.stop_loss.premium_abs.value }}" class="form-control form-control-sm">
+                </div>
+                <div class="form-check d-flex align-items-center gap-2">
+                    <input type="checkbox" class="form-check-input" name="sl_spot_enabled" value="true"
+                           {{ 'checked' if params.stop_loss.spot_level.enabled else '' }}>
+                    <label class="form-check-label flex-shrink-0">Spot level</label>
+                    <input type="number" step="0.01" name="sl_spot_value" value="{{ params.stop_loss.spot_level.value }}" class="form-control form-control-sm">
+                </div>
+            </div>
+            <div class="col-md-6">
+                <label class="form-label">Target <span class="text-body-secondary small">(any checked condition, whichever hits first)</span></label>
+                <div class="form-check d-flex align-items-center gap-2 mb-1">
+                    <input type="checkbox" class="form-check-input" name="target_premium_pct_enabled" value="true"
+                           {{ 'checked' if params.target.premium_pct.enabled else '' }}>
+                    <label class="form-check-label flex-shrink-0">% of premium ≥</label>
+                    <input type="number" step="0.01" name="target_premium_pct_value" value="{{ params.target.premium_pct.value }}" class="form-control form-control-sm">
+                </div>
+                <div class="form-check d-flex align-items-center gap-2 mb-1">
+                    <input type="checkbox" class="form-check-input" name="target_premium_abs_enabled" value="true"
+                           {{ 'checked' if params.target.premium_abs.enabled else '' }}>
+                    <label class="form-check-label flex-shrink-0">Premium (₹) falls to</label>
+                    <input type="number" step="0.01" name="target_premium_abs_value" value="{{ params.target.premium_abs.value }}" class="form-control form-control-sm">
+                </div>
+                <div class="form-check d-flex align-items-center gap-2">
+                    <input type="checkbox" class="form-check-input" name="target_spot_enabled" value="true"
+                           {{ 'checked' if params.target.spot_level.enabled else '' }}>
+                    <label class="form-check-label flex-shrink-0">Spot level</label>
+                    <input type="number" step="0.01" name="target_spot_value" value="{{ params.target.spot_level.value }}" class="form-control form-control-sm">
+                </div>
+            </div>
+            <div class="col-12 small text-body-secondary">
+                Check as many stop-loss/target conditions as you want — whichever one is reached first closes
+                the whole position. "% of premium" and "Premium (₹)" both use the combined premium across all
+                legs (hedge included). "Spot level" is an absolute index level (e.g. 24500), not a distance
+                from entry.
+            </div>
+
+            <div class="col-12"><hr></div>
+
+            <div class="col-12 form-check">
+                <input type="checkbox" class="form-check-input" id="hedgeEnabled" name="hedge_enabled" value="true"
+                       {{ 'checked' if params.hedge_enabled else '' }}>
+                <label class="form-check-label" for="hedgeEnabled">Add a hedge leg</label>
+            </div>
+            <div class="col-md-6">
+                <label class="form-label">Hedge target premium (₹)</label>
+                <input type="number" step="0.01" name="hedge_premium_target" value="{{ params.hedge_premium_target }}" class="form-control">
+                <div class="form-text">
+                    Buys the same-side option further OTM whose current premium is closest to this price.
+                </div>
+            </div>
+
+            <div class="col-12"><hr></div>
+
+            <div class="col-md-6">
+                <label class="form-label">Trading window start</label>
+                <input type="time" name="window_start" value="{{ params.window_start }}" class="form-control">
+            </div>
+            <div class="col-md-6">
+                <label class="form-label">Trading window end</label>
+                <input type="time" name="window_end" value="{{ params.window_end }}" class="form-control">
+                <div class="form-text">No new entries outside this window; any open position is force-closed at the end time.</div>
+            </div>
+
+            <div class="col-12">
+                <label class="form-label">Mode</label>
+                <select name="mode" class="form-select">
+                    <option value="paper" selected>Paper (simulated)</option>
+                    <option value="live">Live</option>
+                </select>
+            </div>
+
+            <div class="col-12 mt-2">
+                <button id="configureSubmitBtn" class="btn btn-primary w-100" type="submit" {{ 'disabled' if not selected_expiry else '' }}>
+                    {{ 'Update Configuration' if existing else 'Save and Enable' }}
+                </button>
+            </div>
+        </form>
+    </div>
+</div>
+{% endif %}
+{% endblock %}

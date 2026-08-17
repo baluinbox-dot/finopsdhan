@@ -1,0 +1,117 @@
+{% extends "base.html" %}
+{% block title %}Strategies — FinOps Dhan Algo{% endblock %}
+{% block content %}
+<h4 class="mb-3">Available Strategies</h4>
+
+{% if not has_dhan %}
+<div class="alert alert-warning">
+    Connect your Dhan account on the <a href="/settings/dhan">Settings page</a> before enabling a strategy.
+</div>
+{% endif %}
+
+{% if not strategies %}
+<p class="text-body-secondary">No strategies have been published yet.</p>
+{% endif %}
+
+<div class="row g-3">
+    {% for s in strategies %}
+    {% set instances = my_instances.get(s.id, []) %}
+    <div class="col-12 col-md-6 col-xl-4">
+        <div class="card stat-card h-100">
+            <div class="card-body d-flex flex-column">
+                <h5 class="card-title">{{ s.name }}</h5>
+                <p class="card-text small text-body-secondary flex-grow-1">{{ s.description }}</p>
+
+                {% if s.code_ref in rich_config_strategies %}
+                    {# Rich-config strategies support multiple concurrent instances
+                       (e.g. a CE seller and a PE seller both running at once). #}
+                    {% if instances %}
+                    <div class="list-group list-group-flush mb-2">
+                        {% for inst in instances %}
+                        <div class="list-group-item px-0 py-2">
+                            <div class="d-flex justify-content-between align-items-start">
+                                <div>
+                                    <div class="fw-semibold">{{ inst.label or (inst.params.option_type ~ ' ' ~ s.name) }}</div>
+                                    <div class="small text-body-secondary">
+                                        {% if inst.is_active %}
+                                        <span class="badge text-bg-success">Active — {{ inst.mode.value }}</span>
+                                        {% else %}
+                                        <span class="badge text-bg-secondary">Paused</span>
+                                        {% endif %}
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="mt-2">
+                                <a href="/strategies/{{ s.id }}/configure?user_strategy_id={{ inst.id }}" class="btn btn-outline-secondary btn-sm w-100 mb-1">Reconfigure</a>
+                                <div class="d-flex gap-2">
+                                    {% if inst.is_active %}
+                                    <form method="post" action="/strategies/instance/{{ inst.id }}/disable" class="flex-grow-1">
+                                        <button class="btn btn-outline-warning btn-sm w-100" type="submit">Pause</button>
+                                    </form>
+                                    {% else %}
+                                    <form method="post" action="/strategies/instance/{{ inst.id }}/resume" class="flex-grow-1">
+                                        <button class="btn btn-outline-success btn-sm w-100" type="submit" {{ 'disabled' if not has_dhan else '' }}>Resume</button>
+                                    </form>
+                                    {% endif %}
+                                    <form method="post" action="/strategies/instance/{{ inst.id }}/delete" class="flex-grow-1"
+                                          onsubmit="return confirm('Permanently delete {{ (inst.label or s.name) | replace("'", "") }}? This removes its order history too. If it has an open position, close it first.');">
+                                        <button class="btn btn-outline-danger btn-sm w-100" type="submit">Delete</button>
+                                    </form>
+                                </div>
+                            </div>
+                        </div>
+                        {% endfor %}
+                    </div>
+                    {% endif %}
+                    <a href="/strategies/{{ s.id }}/configure" class="btn btn-primary btn-sm w-100 {{ 'disabled' if not has_dhan else '' }}">
+                        {{ '+ Add Another Instance' if instances else 'Configure →' }}
+                    </a>
+                {% else %}
+                    {# Simple strategies (e.g. the demo) keep the original single-instance inline form. #}
+                    {% set mine = instances[0] if instances else None %}
+                    {% if mine and mine.is_active %}
+                    <span class="badge text-bg-success mb-2 align-self-start">
+                        Active — {{ mine.mode.value }} mode
+                    </span>
+                    <form method="post" action="/strategies/{{ s.id }}/disable">
+                        <button class="btn btn-outline-danger btn-sm w-100" type="submit">Disable</button>
+                    </form>
+                    {% else %}
+                    <form method="post" action="/strategies/{{ s.id }}/enable" class="row g-2">
+                        <div class="col-6">
+                            <label class="form-label small mb-0">Lots</label>
+                            <input type="number" name="lots" value="1" min="1" class="form-control form-control-sm">
+                        </div>
+                        <div class="col-6">
+                            <label class="form-label small mb-0">Strike offset</label>
+                            <input type="number" name="strike_offset_points" value="200" class="form-control form-control-sm">
+                        </div>
+                        <div class="col-6">
+                            <label class="form-label small mb-0">Stop-loss %</label>
+                            <input type="number" name="stop_loss_pct" value="30" class="form-control form-control-sm">
+                        </div>
+                        <div class="col-6">
+                            <label class="form-label small mb-0">Target %</label>
+                            <input type="number" name="target_pct" value="50" class="form-control form-control-sm">
+                        </div>
+                        <div class="col-12">
+                            <label class="form-label small mb-0">Mode</label>
+                            <select name="mode" class="form-select form-select-sm">
+                                <option value="paper" selected>Paper (simulated)</option>
+                                <option value="live">Live</option>
+                            </select>
+                        </div>
+                        <div class="col-12 mt-2">
+                            <button class="btn btn-primary btn-sm w-100" type="submit" {{ 'disabled' if not has_dhan else '' }}>
+                                Enable Strategy
+                            </button>
+                        </div>
+                    </form>
+                    {% endif %}
+                {% endif %}
+            </div>
+        </div>
+    </div>
+    {% endfor %}
+</div>
+{% endblock %}

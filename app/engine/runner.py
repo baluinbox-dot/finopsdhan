@@ -1,0 +1,285 @@
+"""Evaluates one user's active strategy and acts on it: paper-fills by
+default, or places a real order when explicitly allowed.
+
+Safety rules carried over from the dhanhq-skills SKILL.md, enforced here
+rather than trusted to individual strategies:
+  - every new UserStrategy starts in paper mode (enforced at the router)
+  - live orders require BOTH `user_strategy.mode == LIVE` AND the
+    `ALLOW_LIVE_TRADING` master switch to be true
+  - LIMIT orders only — never MARKET
+  - lot size is taken from the security master via the strategy itself,
+    never hardcoded here
+  - every order preview is logged before being placed
+  - any exception aborts this run without side effects; it never crashes
+    the scheduler loop
+
+An open position's exit rules are evaluated against the params *frozen at
+entry time* (`legs_planned.params_snapshot`), not whatever the user's
+config currently says — editing a strategy's SL/target while a position is
+open must not retroactively change that position's rules.
+"""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import asdict
+from datetime import datetime, timezone
+from typing import Any
+from zoneinfo import ZoneInfo
+
+from sqlalchemy.orm import Session
+
+from app.config import get_settings
+from app.dhan.client import DhanNotConnectedError, get_user_dhan_client
+from app.dhan.helpers import fetch_quotes, preview_order
+from app.models import Order, OrderStatus, StrategyMode, StrategyRun, UserStrategy
+from app.strategies.base import OrderLeg, StrategyContext
+from app.strategies.registry import get_strategy_class
+
+logger = logging.getLogger("app.engine")
+
+IST = ZoneInfo("Asia/Kolkata")
+
+
+def find_open_run(user_strategy: UserStrategy) -> StrategyRun | None:
+    for run in sorted(user_strategy.runs, key=lambda r: r.started_at, reverse=True):
+        if run.status == "open":
+            return run
+    return None
+
+
+def _today_run_count(user_strategy: UserStrategy) -> int:
+    today_ist = datetime.now(IST).date()
+    return sum(1 for run in user_strategy.runs if run.started_at.astimezone(IST).date() == today_ist)
+
+
+def _opposite(transaction_type: str) -> str:
+    return "BUY" if transaction_type == "SELL" else "SELL"
+
+
+def _place_or_paper_leg(
+    db: Session,
+    dhan_client: Any,
+    user_id: Any,
+    strategy_run_id: Any,
+    leg: OrderLeg,
+    *,
+    is_live: bool,
+) -> Order:
+    preview = preview_order(
+        leg.security_id,
+        leg.exchange_segment,
+        leg.transaction_type,
+        leg.quantity,
+        leg.order_type,
+        leg.product_type,
+        price=leg.price,
+        trading_symbol=leg.trading_symbol,
+    )
+    logger.info("Order preview (%s, %s): %s", "LIVE" if is_live else "PAPER", leg.role, preview)
+
+    dhan_order_id = None
+    status = OrderStatus.PAPER_FILLED
+
+    if is_live:
+        response = dhan_client.place_order(
+            security_id=leg.security_id,
+            exchange_segment=leg.exchange_segment,
+            transaction_type=leg.transaction_type,
+            quantity=leg.quantity,
+            order_type=leg.order_type,
+            product_type=leg.product_type,
+            price=leg.price,
+        )
+        if response.get("status") == "success":
+            dhan_order_id = response.get("data", {}).get("orderId")
+            status = OrderStatus.PLACED
+        else:
+            status = OrderStatus.REJECTED
+            logger.warning("Live order rejected: %s", response.get("remarks"))
+
+    order = Order(
+        user_id=user_id,
+        strategy_run_id=strategy_run_id,
+        dhan_order_id=dhan_order_id,
+        security_id=leg.security_id,
+        trading_symbol=leg.trading_symbol,
+        transaction_type=leg.transaction_type,
+        quantity=leg.quantity,
+        order_type=leg.order_type,
+        product_type=leg.product_type,
+        price=leg.price,
+        status=status,
+        is_paper=not is_live,
+    )
+    db.add(order)
+    return order
+
+
+def _close_open_run(
+    db: Session,
+    dhan_client: Any,
+    user_id: Any,
+    open_run: StrategyRun,
+    *,
+    is_live: bool,
+    reason: str,
+) -> None:
+    """Reverse every leg recorded on `open_run` (primary and hedge alike)
+    and mark it closed. Shared by both the scheduled exit path and the
+    manual "Close Now" path so they behave identically."""
+    legs_data = (open_run.legs_planned or {}).get("legs", [])
+
+    # Price exits off fresh quotes, not the stale entry price — reusing the
+    # entry price would make paper P&L meaningless and, in live mode, would
+    # place a LIMIT order at a price with no relation to the current
+    # market. One batched call for every leg; fall back to each leg's own
+    # entry price only if its fresh quote can't be fetched, so closing
+    # never silently no-ops.
+    securities_by_segment: dict[str, list[int]] = {}
+    for leg_data in legs_data:
+        securities_by_segment.setdefault(leg_data["exchange_segment"], []).append(int(leg_data["security_id"]))
+    quotes = fetch_quotes(dhan_client, securities_by_segment)
+
+    for leg_data in legs_data:
+        quote = quotes.get((leg_data["exchange_segment"], str(leg_data["security_id"])))
+        if quote is not None:
+            exit_price = float(quote.get("last_price", leg_data["price"]))
+        else:
+            exit_price = leg_data["price"]
+            logger.warning(
+                "Could not fetch fresh exit quote for %s; using last known price.", leg_data["security_id"]
+            )
+
+        exit_leg = OrderLeg(
+            label=f"EXIT {leg_data['label']}",
+            security_id=leg_data["security_id"],
+            trading_symbol=leg_data["trading_symbol"],
+            exchange_segment=leg_data["exchange_segment"],
+            transaction_type=_opposite(leg_data["transaction_type"]),
+            quantity=leg_data["quantity"],
+            order_type=leg_data["order_type"],
+            product_type=leg_data["product_type"],
+            price=exit_price,
+            role=leg_data.get("role", "primary"),
+        )
+        _place_or_paper_leg(db, dhan_client, user_id, open_run.id, exit_leg, is_live=is_live)
+
+    open_run.status = "closed"
+    open_run.evaluation_notes = reason
+    db.commit()
+
+
+def run_user_strategy(db: Session, user_strategy: UserStrategy) -> None:
+    if not user_strategy.is_active:
+        return
+
+    user = user_strategy.user
+    strategy = user_strategy.strategy
+
+    try:
+        strategy_cls = get_strategy_class(strategy.code_ref)
+    except ValueError:
+        logger.error("Strategy %s has unknown code_ref=%s", strategy.id, strategy.code_ref)
+        return
+
+    try:
+        user_dhan = get_user_dhan_client(db, user)
+    except DhanNotConnectedError:
+        logger.info("Skipping %s for %s: no active Dhan connection", strategy.name, user.email)
+        return
+
+    settings = get_settings()
+    is_live = user_strategy.mode == StrategyMode.LIVE and settings.allow_live_trading
+    impl = strategy_cls()
+
+    try:
+        open_run = find_open_run(user_strategy)
+
+        if open_run is not None:
+            # Exit rules use the params frozen at entry, not the live config.
+            snapshot_params = (open_run.legs_planned or {}).get("params_snapshot") or {
+                **strategy.default_params,
+                **user_strategy.params,
+            }
+            exit_ctx = StrategyContext(dhan_client=user_dhan.client, params=snapshot_params)
+
+            should_exit = impl.evaluate_exit(exit_ctx, open_run.legs_planned or {})
+            if not should_exit:
+                return
+
+            _close_open_run(
+                db,
+                user_dhan.client,
+                user.id,
+                open_run,
+                is_live=is_live,
+                reason="Exit conditions met; opposite-side orders placed for all legs.",
+            )
+            return
+
+        entry_params = {**strategy.default_params, **user_strategy.params}
+        entry_ctx = StrategyContext(
+            dhan_client=user_dhan.client,
+            params=entry_params,
+            today_run_count=_today_run_count(user_strategy),
+        )
+
+        legs = impl.evaluate_entry(entry_ctx)
+        if not legs:
+            return
+
+        entry_premium = sum(leg.price for leg in legs if leg.transaction_type == "SELL") - sum(
+            leg.price for leg in legs if leg.transaction_type == "BUY"
+        )
+
+        run = StrategyRun(
+            user_strategy_id=user_strategy.id,
+            started_at=datetime.now(timezone.utc),
+            status="open",
+            legs_planned={
+                "legs": [asdict(leg) for leg in legs],
+                "entry_premium": entry_premium,
+                "params_snapshot": entry_params,
+            },
+            evaluation_notes=f"Entered {len(legs)} leg(s) in {'LIVE' if is_live else 'PAPER'} mode.",
+        )
+        db.add(run)
+        db.flush()  # assign run.id before orders reference it
+
+        for leg in legs:
+            _place_or_paper_leg(db, user_dhan.client, user.id, run.id, leg, is_live=is_live)
+
+        db.commit()
+
+    except Exception:
+        db.rollback()
+        logger.exception("Error evaluating strategy %s for user %s", strategy.name, user.email)
+
+
+def close_user_strategy_now(db: Session, user_strategy: UserStrategy) -> bool:
+    """Immediately close an open position for this strategy, outside the
+    normal poll cycle — the "Close Now" button's action. Returns True if a
+    position was found and closed, False if there was nothing open."""
+    open_run = find_open_run(user_strategy)
+    if open_run is None:
+        return False
+
+    user = user_strategy.user
+    settings = get_settings()
+    is_live = user_strategy.mode == StrategyMode.LIVE and settings.allow_live_trading
+
+    try:
+        user_dhan = get_user_dhan_client(db, user)
+    except DhanNotConnectedError:
+        raise
+
+    _close_open_run(
+        db,
+        user_dhan.client,
+        user.id,
+        open_run,
+        is_live=is_live,
+        reason="Manually closed by user.",
+    )
+    return True

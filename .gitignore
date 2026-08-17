@@ -1,0 +1,34 @@
+# Reference material (cloned for developer reading, not part of this project's history)
+.reference/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+
+# Env / secrets
+.env
+*.pem
+*.key
+
+# DB
+*.sqlite3
+pgdata/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Downloaded/cached data (e.g. dhanhq's security master CSV)
+security_id_list.csv
+*.csv

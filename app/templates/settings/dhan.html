@@ -1,0 +1,97 @@
+{% extends "base.html" %}
+{% block title %}Dhan Settings — FinOps Dhan Algo{% endblock %}
+{% block content %}
+<div class="row g-4">
+    <div class="col-lg-7">
+        <div class="card stat-card">
+            <div class="card-body">
+                <h5 class="card-title mb-3"><i class="bi bi-link-45deg"></i> Connect Your Dhan Account</h5>
+
+                {% if credential %}
+                <div class="alert alert-success d-flex justify-content-between align-items-center">
+                    <div>
+                        <strong>Connected</strong> — Client ID <code>{{ credential.client_id }}</code><br>
+                        <small class="text-body-secondary">
+                            Last validated:
+                            {{ (credential.last_validated_at | to_ist).strftime('%d %b %Y, %H:%M') ~ ' IST' if credential.last_validated_at else 'never' }}
+                        </small>
+                    </div>
+                </div>
+
+                {% if credential.last_profile_snapshot %}
+                <table class="table table-sm">
+                    <tbody>
+                        <tr><th class="w-50">Data Plan</th><td>{{ credential.last_profile_snapshot.dataPlan or '—' }}</td></tr>
+                        <tr><th>Data Validity</th><td>{{ credential.last_profile_snapshot.dataValidity or '—' }}</td></tr>
+                        <tr><th>Token Validity</th><td>{{ credential.last_profile_snapshot.tokenValidity or '—' }}</td></tr>
+                        <tr><th>Active Segment</th><td>{{ credential.last_profile_snapshot.activeSegment or '—' }}</td></tr>
+                    </tbody>
+                </table>
+                {% endif %}
+
+                <div class="d-grid d-md-flex gap-2">
+                    <form method="post" action="/settings/dhan/test">
+                        <button id="testBtn" type="submit" class="btn btn-outline-primary">Test Connection</button>
+                    </form>
+                    <form method="post" action="/settings/dhan/disconnect" onsubmit="return confirm('Disconnect your Dhan account? Active strategies will stop running until reconnected.');">
+                        <button id="disconnectBtn" type="submit" class="btn btn-outline-danger">Disconnect</button>
+                    </form>
+                </div>
+                <hr>
+                <p class="small text-body-secondary mb-2">Reconnect with a fresh token below (tokens expire periodically):</p>
+                {% endif %}
+
+                <form method="post" action="/settings/dhan/connect">
+                    <div class="mb-3">
+                        <label class="form-label">Dhan Client ID</label>
+                        <input type="text" name="client_id" class="form-control" required
+                               value="{{ credential.client_id if credential else '' }}">
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Dhan Access Token</label>
+                        <input type="password" name="access_token" class="form-control" required
+                               placeholder="Paste the access token generated on web.dhan.co">
+                    </div>
+                    <button id="connectBtn" type="submit" class="btn btn-primary">
+                        {{ 'Update Connection' if credential else 'Connect Dhan Account' }}
+                    </button>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-lg-5">
+        <div class="card stat-card border-warning">
+            <div class="card-body">
+                <h6 class="card-title"><i class="bi bi-exclamation-triangle-fill text-warning"></i> Important: Static IP Whitelisting</h6>
+                <p class="small">
+                    Dhan requires our server's IP address to be whitelisted on
+                    <strong>your</strong> Dhan account before it will accept order
+                    placement, modification, cancellation, super orders, or forever
+                    orders. This applies even though you're logging in with your own
+                    Client ID and Access Token.
+                </p>
+                <p class="mb-1">Our server's static IP:</p>
+                <p><code class="fs-6">{{ server_static_ip }}</code></p>
+                <ol class="small mb-0">
+                    <li>Log in to <a href="https://web.dhan.co" target="_blank" rel="noopener">web.dhan.co</a></li>
+                    <li>Go to My Profile → Access DhanHQ APIs</li>
+                    <li>Add the IP address above to the whitelist</li>
+                    <li>Come back here and click "Test Connection"</li>
+                </ol>
+            </div>
+        </div>
+
+        <div class="card stat-card mt-3">
+            <div class="card-body">
+                <h6 class="card-title"><i class="bi bi-shield-check"></i> How your credentials are stored</h6>
+                <p class="small mb-0">
+                    Your access token is encrypted at rest and is only ever decrypted
+                    server-side to call Dhan's API on your behalf for strategies you
+                    have explicitly turned on. It is never shown back to you or logged.
+                </p>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
