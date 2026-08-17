@@ -15,11 +15,17 @@
                 <td><code>{{ s.code_ref }}</code></td>
                 <td>{% if s.is_published %}<span class="badge text-bg-success">Yes</span>{% else %}<span class="badge text-bg-secondary">No</span>{% endif %}</td>
                 <td>
-                    <form method="post" action="/strategies/admin/{{ s.id }}/toggle-publish">
-                        <button class="btn btn-sm btn-outline-primary" type="submit">
-                            {{ 'Unpublish' if s.is_published else 'Publish' }}
-                        </button>
-                    </form>
+                    <div class="d-flex gap-2">
+                        <form method="post" action="/strategies/admin/{{ s.id }}/toggle-publish">
+                            <button class="btn btn-sm btn-outline-primary" type="submit">
+                                {{ 'Unpublish' if s.is_published else 'Publish' }}
+                            </button>
+                        </form>
+                        <form method="post" action="/strategies/admin/{{ s.id }}/delete"
+                              onsubmit="return confirm('Permanently delete {{ (s.name) | replace("'", "") }} and every user\'s instance of it? This cannot be undone.');">
+                            <button class="btn btn-sm btn-outline-danger" type="submit">Delete</button>
+                        </form>
+                    </div>
                 </td>
             </tr>
             {% else %}
