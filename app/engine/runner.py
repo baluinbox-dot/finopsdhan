@@ -122,6 +122,18 @@ def _place_or_paper_leg(
     return order
 
 
+def _leg_realized_pnl(leg_data: dict[str, Any], exit_price: float) -> float:
+    """Realized P&L in rupees for one leg's round trip. A SELL entry
+    profits when the exit is cheaper (bought back for less than
+    collected); a BUY entry (e.g. a hedge) profits when the exit is
+    pricier (sold for more than paid)."""
+    entry_price = float(leg_data["price"])
+    quantity = leg_data["quantity"]
+    if leg_data["transaction_type"] == "SELL":
+        return (entry_price - exit_price) * quantity
+    return (exit_price - entry_price) * quantity
+
+
 def _close_open_run(
     db: Session,
     dhan_client: Any,
@@ -150,6 +162,7 @@ def _close_open_run(
         securities_by_segment.setdefault(leg_data["exchange_segment"], []).append(int(leg_data["security_id"]))
     quotes = fetch_quotes(dhan_client, securities_by_segment)
 
+    pnl_delta = 0.0
     for leg_data in legs_data:
         quote = quotes.get((leg_data["exchange_segment"], str(leg_data["security_id"])))
         if quote is not None:
@@ -173,10 +186,13 @@ def _close_open_run(
             role=leg_data.get("role", "primary"),
         )
         _place_or_paper_leg(db, dhan_client, user_id, open_run.id, exit_leg, is_live=is_live)
+        pnl_delta += _leg_realized_pnl(leg_data, exit_price)
 
     open_run.status = "closed"
     open_run.evaluation_notes = reason
     open_run.manually_closed = is_manual
+    open_run.realized_pnl = float(open_run.realized_pnl or 0) + pnl_delta
+    open_run.closed_at = datetime.now(timezone.utc)
     db.commit()
 
 

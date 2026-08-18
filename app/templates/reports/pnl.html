@@ -1,0 +1,153 @@
+{% extends "base.html" %}
+{% block title %}Reports — FinOps Dhan Algo{% endblock %}
+{% block content %}
+<h4 class="mb-3">P&amp;L Reports</h4>
+
+<div class="card stat-card mb-4">
+    <div class="card-body">
+        <form method="get" action="{{ url('/reports') }}" class="row g-2 align-items-end">
+            <div class="col-auto">
+                <label class="form-label small mb-0">Strategy Instance</label>
+                <select name="instance" class="form-select form-select-sm">
+                    <option value="">All</option>
+                    {% for us in user_strategies %}
+                    <option value="{{ us.id }}" {{ 'selected' if selected_instance == us.id|string else '' }}>
+                        {{ us.label or us.strategy.name }}
+                    </option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-auto">
+                <label class="form-label small mb-0">Mode</label>
+                <select name="mode" class="form-select form-select-sm">
+                    <option value="">All</option>
+                    <option value="paper" {{ 'selected' if selected_mode == 'paper' else '' }}>Paper</option>
+                    <option value="live" {{ 'selected' if selected_mode == 'live' else '' }}>Live</option>
+                </select>
+            </div>
+            <div class="col-auto">
+                <label class="form-label small mb-0">From</label>
+                <input type="date" name="start" value="{{ start }}" class="form-control form-control-sm">
+            </div>
+            <div class="col-auto">
+                <label class="form-label small mb-0">To</label>
+                <input type="date" name="end" value="{{ end }}" class="form-control form-control-sm">
+            </div>
+            <div class="col-auto">
+                <button class="btn btn-outline-secondary btn-sm" type="submit">Apply</button>
+            </div>
+            {% if selected_instance or selected_mode or start or end %}
+            <div class="col-auto">
+                <a href="{{ url('/reports') }}" class="btn btn-outline-secondary btn-sm">Clear</a>
+            </div>
+            {% endif %}
+        </form>
+    </div>
+</div>
+
+{% if total_trades == 0 %}
+<p class="text-body-secondary">No closed trades match these filters yet — once a position closes (automatically or via Close Now), it'll show up here.</p>
+{% else %}
+
+<div class="row g-3 mb-4">
+    <div class="col-6 col-md-2">
+        <div class="card stat-card text-center h-100">
+            <div class="card-body">
+                <div class="fs-4 fw-bold {{ 'text-success' if total_pnl > 0 else ('text-danger' if total_pnl < 0 else '') }}">
+                    {{ '%+.0f'|format(total_pnl) }}
+                </div>
+                <div class="small text-body-secondary">Total P&amp;L (₹)</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-6 col-md-2">
+        <div class="card stat-card text-center h-100">
+            <div class="card-body">
+                <div class="fs-4 fw-bold">{{ total_trades }}</div>
+                <div class="small text-body-secondary">Trades</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-6 col-md-2">
+        <div class="card stat-card text-center h-100">
+            <div class="card-body">
+                <div class="fs-4 fw-bold">{{ '%.0f'|format(win_rate) if win_rate is not none else '—' }}%</div>
+                <div class="small text-body-secondary">Win Rate ({{ wins }}W / {{ losses }}L)</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-6 col-md-2">
+        <div class="card stat-card text-center h-100">
+            <div class="card-body">
+                <div class="fs-4 fw-bold {{ 'text-success' if avg_pnl and avg_pnl > 0 else ('text-danger' if avg_pnl and avg_pnl < 0 else '') }}">
+                    {{ '%+.0f'|format(avg_pnl) if avg_pnl is not none else '—' }}
+                </div>
+                <div class="small text-body-secondary">Avg P&amp;L / Trade</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-6 col-md-2">
+        <div class="card stat-card text-center h-100">
+            <div class="card-body">
+                <div class="fs-6 fw-bold text-success">
+                    {% if best_day %}{{ '%+.0f'|format(best_day[1]) }}{% else %}—{% endif %}
+                </div>
+                <div class="small text-body-secondary">{{ best_day[0].strftime('%d %b') if best_day else 'Best Day' }}</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-6 col-md-2">
+        <div class="card stat-card text-center h-100">
+            <div class="card-body">
+                <div class="fs-6 fw-bold text-danger">
+                    {% if worst_day %}{{ '%+.0f'|format(worst_day[1]) }}{% else %}—{% endif %}
+                </div>
+                <div class="small text-body-secondary">{{ worst_day[0].strftime('%d %b') if worst_day else 'Worst Day' }}</div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<h5 class="mb-2">Date-wise, by Strategy</h5>
+<div class="table-responsive mb-4">
+    <table class="table table-sm align-middle">
+        <thead><tr><th>Date</th><th>Strategy</th><th>Mode</th><th>Trades</th><th>W / L</th><th>P&amp;L</th></tr></thead>
+        <tbody>
+        {% for row in date_rows %}
+            <tr>
+                <td>{{ row.date.strftime('%d %b %Y') }}</td>
+                <td>{{ row.label }}</td>
+                <td>{{ row.mode }}</td>
+                <td>{{ row.trades }}</td>
+                <td>{{ row.wins }} / {{ row.losses }}</td>
+                <td class="fw-semibold {{ 'text-success' if row.pnl > 0 else ('text-danger' if row.pnl < 0 else '') }}">
+                    {{ '%+.0f'|format(row.pnl) }}
+                </td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<h5 class="mb-2">Trade Detail</h5>
+<div class="table-responsive">
+    <table class="table table-sm align-middle">
+        <thead><tr><th>Closed</th><th>Strategy</th><th>Mode</th><th>Entered</th><th>P&amp;L</th><th>Reason</th></tr></thead>
+        <tbody>
+        {% for run in trades %}
+            <tr>
+                <td class="small">{{ (run.closed_at | to_ist).strftime('%d %b, %H:%M') if run.closed_at else '—' }}</td>
+                <td>{{ run.user_strategy.label or run.user_strategy.strategy.name }}</td>
+                <td>{{ run.user_strategy.mode.value }}</td>
+                <td class="small">{{ (run.started_at | to_ist).strftime('%d %b, %H:%M') }}</td>
+                <td class="fw-semibold {{ 'text-success' if run.realized_pnl > 0 else ('text-danger' if run.realized_pnl < 0 else '') }}">
+                    {{ '%+.0f'|format(run.realized_pnl) }}
+                </td>
+                <td class="small text-body-secondary">{{ run.evaluation_notes }}</td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
+{% endblock %}
