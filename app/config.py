@@ -40,6 +40,18 @@ class Settings(BaseSettings):
     # anywhere. Set back to true (or unset) once real TLS is in front of it.
     session_cookie_secure: bool | None = None
 
+    # --- Outbound email (verification links, password reset) ---
+    # Empty smtp_host means "not configured" — app.email.send_email logs a
+    # warning and no-ops rather than raising, so a missing/broken mail
+    # config degrades to "no email sent" instead of crashing the request
+    # that triggered it (registration, forgot-password).
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_username: str = ""
+    smtp_password: str = ""
+    smtp_from_email: str = ""
+    smtp_use_tls: bool = True
+
     @property
     def is_production(self) -> bool:
         return self.env.lower() == "production"

@@ -48,6 +48,12 @@ def client(db_session, monkeypatch):
     monkeypatch.setattr("app.main.start_scheduler", lambda: None)
     monkeypatch.setattr("app.main.stop_scheduler", lambda: None)
 
+    # Login/register render a random "a + b" arithmetic CAPTCHA. Fix both
+    # random draws to the same value so every test knows the expected
+    # answer (CAPTCHA_ANSWER below) without needing to scrape it out of
+    # rendered HTML.
+    monkeypatch.setattr("app.routers.auth.random.randint", lambda lo, hi: 4)
+
     from app.main import app
 
     def override_get_db():
@@ -57,3 +63,7 @@ def client(db_session, monkeypatch):
     with TestClient(app) as test_client:
         yield test_client
     app.dependency_overrides.clear()
+
+
+# Matches the fixed random.randint patch above (4 + 4).
+CAPTCHA_ANSWER = "8"
