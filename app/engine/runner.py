@@ -49,8 +49,15 @@ def find_open_run(user_strategy: UserStrategy) -> StrategyRun | None:
 
 
 def _today_run_count(user_strategy: UserStrategy) -> int:
+    """Counts today's runs toward a strategy's one-entry-per-day cap —
+    except ones ended via manual "Close Now", which don't burn that shot.
+    A run still open counts regardless (irrelevant either way: entry is
+    only ever evaluated when there's no open run to begin with)."""
     today_ist = datetime.now(IST).date()
-    return sum(1 for run in user_strategy.runs if run.started_at.astimezone(IST).date() == today_ist)
+    return sum(
+        1 for run in user_strategy.runs
+        if run.started_at.astimezone(IST).date() == today_ist and not run.manually_closed
+    )
 
 
 def _opposite(transaction_type: str) -> str:
@@ -124,10 +131,13 @@ def _close_open_run(
     *,
     is_live: bool,
     reason: str,
+    is_manual: bool = False,
 ) -> None:
     """Reverse every leg recorded on `open_run` (primary and hedge alike)
     and mark it closed. Shared by both the scheduled exit path and the
-    manual "Close Now" path so they behave identically."""
+    manual "Close Now" path so they behave identically (aside from
+    `is_manual`, which only affects whether this run counts toward the
+    strategy's one-entry-per-day cap — see `_today_run_count`)."""
     legs_data = (open_run.legs_planned or {}).get("legs", [])
 
     # Price exits off fresh quotes, not the stale entry price — reusing the
@@ -167,6 +177,7 @@ def _close_open_run(
 
     open_run.status = "closed"
     open_run.evaluation_notes = reason
+    open_run.manually_closed = is_manual
     db.commit()
 
 
@@ -281,5 +292,6 @@ def close_user_strategy_now(db: Session, user_strategy: UserStrategy) -> bool:
         open_run,
         is_live=is_live,
         reason="Manually closed by user.",
+        is_manual=True,
     )
     return True
