@@ -616,6 +616,8 @@ def configure_rolling_submit(
     strike_gap: float = Form(50),
     daily_stop_loss: float = Form(10000),
     daily_target: float = Form(15000),
+    hedge_enabled: bool = Form(False),
+    hedge_premium_target: float = Form(5),
     mode: str = Form("paper"),
 ):
     strategy = db.get(Strategy, strategy_id)
@@ -665,6 +667,8 @@ def configure_rolling_submit(
         "strike_gap": strike_gap,
         "daily_stop_loss": daily_stop_loss,
         "daily_target": daily_target,
+        "hedge_enabled": hedge_enabled,
+        "hedge_premium_target": hedge_premium_target,
     }
 
     existing: UserStrategy | None = None
@@ -678,6 +682,221 @@ def configure_rolling_submit(
             return RedirectResponse(url("/strategies"), status_code=303)
 
     final_label = label.strip() or f"3-Pair Rolling {params['underlying']}"
+
+    if existing:
+        existing.label = final_label
+        existing.params = params
+        existing.mode = requested_mode
+        existing.is_active = True
+    else:
+        db.add(
+            UserStrategy(
+                user_id=current_user.id,
+                strategy_id=strategy_id,
+                label=final_label,
+                params=params,
+                mode=requested_mode,
+                is_active=True,
+            )
+        )
+    db.commit()
+
+    flash(request, f"{final_label} configured and enabled in {requested_mode.value} mode.", "success")
+    return RedirectResponse(url("/strategies"), status_code=303)
+
+
+@router.get("/{strategy_id}/configure-straddle")
+def configure_straddle_form(
+    request: Request,
+    db: DbSession,
+    current_user: CurrentUser,
+    strategy_id: uuid.UUID,
+    user_strategy_id: str = "",
+    underlying: str = "",
+    expiry: str = "",
+):
+    strategy = db.get(Strategy, strategy_id)
+    if strategy is None or not strategy.is_published:
+        flash(request, "Strategy not found.", "error")
+        return RedirectResponse(url("/strategies"), status_code=303)
+
+    existing: UserStrategy | None = None
+    if user_strategy_id:
+        try:
+            existing = db.get(UserStrategy, uuid.UUID(user_strategy_id))
+        except ValueError:
+            existing = None
+        if existing is None or existing.user_id != current_user.id or existing.strategy_id != strategy_id:
+            flash(request, "Strategy instance not found.", "error")
+            return RedirectResponse(url("/strategies"), status_code=303)
+
+    existing_params = existing.params if existing else {}
+    underlying = (underlying or existing_params.get("underlying") or "NIFTY").upper()
+    if underlying not in UNDERLYINGS:
+        underlying = "NIFTY"
+    if not expiry:
+        expiry = existing_params.get("expiry") or ""
+
+    has_dhan = current_user.dhan_credential is not None and current_user.dhan_credential.is_active
+
+    expiries: list[str] = []
+    expiry_error: str | None = None
+    atm_preview: dict | None = None
+    selected_expiry = expiry
+
+    if has_dhan:
+        try:
+            user_dhan = get_user_dhan_client(db, current_user)
+            expiries = list_expiries(user_dhan.client, underlying)
+        except DhanNotConnectedError as exc:
+            expiry_error = str(exc)
+        except Exception as exc:  # noqa: BLE001
+            expiry_error = f"Could not fetch expiries from Dhan: {exc}"
+
+        if not selected_expiry and expiries:
+            selected_expiry = expiries[0]
+
+        if selected_expiry and selected_expiry in expiries:
+            try:
+                meta = UNDERLYINGS[underlying]
+                chain_df, spot = fetch_chain_df(
+                    user_dhan.client,
+                    under_security_id=meta["security_id"],
+                    expiry=selected_expiry,
+                    under_exchange_segment=meta["exchange_segment"],
+                )
+                if not chain_df.empty:
+                    strikes = sorted(chain_df["strike"].tolist())
+                    atm_strike = min(strikes, key=lambda x: abs(x - spot))
+                    row = chain_df[chain_df["strike"] == atm_strike].iloc[0]
+                    ce_ltp = row.get("ce_ltp")
+                    pe_ltp = row.get("pe_ltp")
+                    atm_preview = {
+                        "spot": spot,
+                        "strike": atm_strike,
+                        "ce_ltp": ce_ltp,
+                        "pe_ltp": pe_ltp,
+                        "combined": (float(ce_ltp) + float(pe_ltp)) if ce_ltp is not None and pe_ltp is not None else None,
+                    }
+            except Exception as exc:  # noqa: BLE001 — preview is a nice-to-have, never block the form
+                expiry_error = expiry_error or f"Could not fetch live strikes: {exc}"
+
+    try:
+        strategy_cls = get_strategy_class(strategy.code_ref)
+        class_defaults = strategy_cls.default_params
+    except ValueError:
+        class_defaults = {}
+    params = {**class_defaults, **strategy.default_params, **existing_params}
+    params["underlying"] = underlying
+
+    return render(
+        request,
+        "strategies/configure_atm_straddle.html",
+        {
+            "current_user": current_user,
+            "user_strategy_id": user_strategy_id,
+            "strategy": strategy,
+            "has_dhan": has_dhan,
+            "underlyings": UNDERLYINGS,
+            "selected_underlying": underlying,
+            "selected_expiry": selected_expiry,
+            "expiries": expiries,
+            "expiry_error": expiry_error,
+            "atm_preview": atm_preview,
+            "params": params,
+            "existing": existing,
+        },
+    )
+
+
+@router.post("/{strategy_id}/configure-straddle")
+def configure_straddle_submit(
+    request: Request,
+    db: DbSession,
+    current_user: CurrentUser,
+    strategy_id: uuid.UUID,
+    user_strategy_id: str = Form(""),
+    label: str = Form(""),
+    underlying: str = Form(...),
+    expiry: str = Form(...),
+    lots: int = Form(1),
+    entry_time: str = Form("09:15"),
+    close_time: str = Form("15:15"),
+    reference_premium: float = Form(0),
+    entry_trigger_mode: str = Form("pct"),
+    entry_trigger_pct: float = Form(10),
+    entry_trigger_flat: float = Form(0),
+    leg_stop_loss_pct: float = Form(25),
+    target_pct: float = Form(80),
+    hedge_enabled: bool = Form(False),
+    hedge_premium_target: float = Form(5),
+    mode: str = Form("paper"),
+):
+    strategy = db.get(Strategy, strategy_id)
+    if strategy is None or not strategy.is_published:
+        flash(request, "Strategy not found.", "error")
+        return RedirectResponse(url("/strategies"), status_code=303)
+
+    if not current_user.dhan_credential or not current_user.dhan_credential.is_active:
+        flash(request, "Connect your Dhan account on the Settings page before enabling a strategy.", "error")
+        return RedirectResponse(url("/strategies"), status_code=303)
+
+    if underlying.upper() not in UNDERLYINGS:
+        flash(request, "Unknown underlying.", "error")
+        return RedirectResponse(url(f"/strategies/{strategy_id}/configure-straddle"), status_code=303)
+
+    if not expiry:
+        flash(request, "Pick an expiry before saving.", "error")
+        redirect_url = f"/strategies/{strategy_id}/configure-straddle?underlying={underlying}"
+        if user_strategy_id:
+            redirect_url += f"&user_strategy_id={user_strategy_id}"
+        return RedirectResponse(url(redirect_url), status_code=303)
+
+    if reference_premium <= 0:
+        flash(request, "Set the combined CE+PE reference premium (from today's ATM prices) before saving.", "error")
+        redirect_url = f"/strategies/{strategy_id}/configure-straddle?underlying={underlying}&expiry={expiry}"
+        if user_strategy_id:
+            redirect_url += f"&user_strategy_id={user_strategy_id}"
+        return RedirectResponse(url(redirect_url), status_code=303)
+
+    requested_mode = StrategyMode.LIVE if mode == "live" else StrategyMode.PAPER
+    if requested_mode == StrategyMode.LIVE:
+        flash(
+            request,
+            "Live trading isn't enabled from this screen yet — the strategy has been "
+            "turned on in paper mode instead. Live mode requires a separate explicit "
+            "confirmation step.",
+            "warning",
+        )
+        requested_mode = StrategyMode.PAPER
+
+    params = {
+        "underlying": underlying.upper(),
+        "expiry": expiry,
+        "lots": lots,
+        "entry_time": entry_time,
+        "close_time": close_time,
+        "reference_premium": reference_premium,
+        "entry_trigger_mode": "flat" if entry_trigger_mode == "flat" else "pct",
+        "entry_trigger_pct": entry_trigger_pct,
+        "entry_trigger_flat": entry_trigger_flat,
+        "leg_stop_loss_pct": leg_stop_loss_pct,
+        "target_pct": target_pct,
+        "hedge_enabled": hedge_enabled,
+        "hedge_premium_target": hedge_premium_target,
+    }
+
+    existing: UserStrategy | None = None
+    if user_strategy_id:
+        try:
+            existing = db.get(UserStrategy, uuid.UUID(user_strategy_id))
+        except ValueError:
+            existing = None
+        if existing is None or existing.user_id != current_user.id or existing.strategy_id != strategy_id:
+            flash(request, "Strategy instance not found.", "error")
+            return RedirectResponse(url("/strategies"), status_code=303)
+
+    final_label = label.strip() or f"ATM Straddle {params['underlying']}"
 
     if existing:
         existing.label = final_label

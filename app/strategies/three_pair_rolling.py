@@ -26,6 +26,16 @@ rest of the day the moment either is breached — as does the configured
 end time. Manual Close reuses the existing generic "Close Now" path
 unchanged. One entry per day, same `ctx.today_run_count` convention as
 every other strategy here.
+
+An optional hedge (one CE buy + one PE buy, picked by nearest live premium
+to a target price, e.g. Rs 5 or Rs 10) protects the *combined* exposure of
+all three pairs at once — sized at `lots * 3`, since three pairs each
+sell `lots` on both sides. The hedge is bought once at entry and never
+rolls with the T/M/B window (`evaluate_rolls` only ever touches
+`role == "primary"` legs) — it sits fixed for the whole day and is closed,
+along with everything else, by the existing whole-position close path
+(`_close_open_run` in the engine), whether that's the daily SL/target, end
+time, or a manual Close Now.
 """
 
 from __future__ import annotations
@@ -36,7 +46,14 @@ from datetime import time as dt_time
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from app.dhan.helpers import UNDERLYINGS, fetch_chain_df, fetch_quotes, fetch_spot_price, get_lot_size
+from app.dhan.helpers import (
+    UNDERLYINGS,
+    fetch_chain_df,
+    fetch_quotes,
+    fetch_spot_price,
+    find_strike_by_nearest_premium,
+    get_lot_size,
+)
 from app.strategies.base import OrderLeg, Strategy, StrategyContext, leg_pnl
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -98,6 +115,8 @@ class ThreePairRollingStrategy(Strategy):
         "strike_gap": 50,
         "daily_stop_loss": 10000,
         "daily_target": 15000,
+        "hedge_enabled": False,
+        "hedge_premium_target": 5,  # buy the closest-premium CE/PE hedge to this price
     }
 
     def evaluate_entry(self, ctx: StrategyContext) -> list[OrderLeg] | None:
@@ -182,6 +201,36 @@ class ThreePairRollingStrategy(Strategy):
                 role="primary",
             ))
 
+        if p.get("hedge_enabled"):
+            # One CE hedge + one PE hedge cover all three pairs' combined
+            # exposure at once (not one hedge per pair) — sized at 3x the
+            # per-pair lot count. Picked once, from the initial ATM, and
+            # never touched again today (see module docstring).
+            atm_index = strikes.index(m_strike)
+            hedge_target = float(p.get("hedge_premium_target") or 0)
+            hedge_quantity = (lot_size or 0) * int(p["lots"]) * 3
+            for option_type, price_col, sid_col in (("CE", "ce_ltp", "ce_security_id"), ("PE", "pe_ltp", "pe_security_id")):
+                best_strike, best_row = find_strike_by_nearest_premium(
+                    chain_df, strikes, atm_index, option_type, price_col, sid_col, hedge_target, include_start=False,
+                )
+                if best_row is None:
+                    # Hedge was requested but no valid candidate strike was
+                    # found this pass — never go live naked when a hedge
+                    # was asked for; skip entry and retry next poll.
+                    return None
+                legs.append(OrderLeg(
+                    label=f"HEDGE BUY {int(best_strike)} {option_type} ({expiry})",
+                    security_id=str(best_row[sid_col]),
+                    trading_symbol=f"{underlying} {int(best_strike)} {option_type} {expiry}",
+                    exchange_segment="NSE_FNO",
+                    transaction_type="BUY",
+                    quantity=hedge_quantity,
+                    order_type="LIMIT",
+                    product_type="INTRADAY",
+                    price=float(best_row[price_col]),
+                    role="hedge",
+                ))
+
         return legs
 
     def evaluate_exit(self, ctx: StrategyContext, open_run_notes: dict[str, Any]) -> bool:
@@ -250,8 +299,12 @@ class ThreePairRollingStrategy(Strategy):
 
         # Currently-open legs grouped by strike — the window should always
         # be exactly 3 strikes (B, M, T ascending), each with a CE+PE pair.
+        # Hedge legs are deliberately excluded: they're bought once at
+        # entry and never roll with the window (see module docstring).
         groups: dict[float, list[dict]] = {}
         for leg in legs:
+            if leg.get("role") != "primary":
+                continue
             if _leg_state(str(leg["security_id"]), leg_state)["status"] != "open":
                 continue
             strike = _strike_of(leg)

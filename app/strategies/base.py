@@ -71,9 +71,10 @@ class Strategy(ABC):
         """Return legs to enter now, or None if entry conditions aren't met."""
 
     def evaluate_exit(self, ctx: StrategyContext, open_run_notes: dict[str, Any]) -> bool:
-        """Return True if the currently open position (described by
+        """Return True if the *entire* currently open position (described by
         `open_run_notes`, taken from the entry run's `legs_planned`) should
-        be exited now. Default: never exit automatically."""
+        be exited now — every leg still open gets reversed. Default: never
+        exit automatically."""
         return False
 
     def evaluate_rolls(self, ctx: StrategyContext, open_run_notes: dict[str, Any]) -> dict[str, Any] | None:
@@ -96,4 +97,33 @@ class Strategy(ABC):
         strike a given `pair_id` has ever held today, not just its current
         one. Default: not implemented — strategies that don't roll never
         call this."""
+        return None
+
+    def evaluate_leg_exits(self, ctx: StrategyContext, open_run_notes: dict[str, Any]) -> dict[str, Any] | None:
+        """Opt-in hook for strategies that manage legs *independently*
+        within one open position — e.g. a per-leg stop-loss where hitting
+        one leg's SL squares off only that leg (and its own hedge) while
+        the other leg stays open, possibly with its stop trailed to cost.
+        Called by the engine only when `evaluate_exit` didn't already
+        decide to close everything.
+
+        `open_run_notes` carries whatever `evaluate_leg_exits` previously
+        asked the engine to persist, under `"leg_state"` (keyed by
+        security_id, e.g. `{"status": "open"|"closed", ...strategy-defined
+        fields}`) — a security_id absent from `leg_state` is treated as
+        still open. Return None to do nothing this pass. Return a dict to
+        act:
+            {
+                "close_security_ids": [...],   # legs to reverse right now
+                "leg_state_patch": {sid: {...}},  # shallow-merged into
+                                                   # leg_state for *any*
+                                                   # security_id (open or
+                                                   # being closed) — e.g.
+                                                   # trailing a surviving
+                                                   # leg's stop to cost.
+            }
+        The engine marks every id in `close_security_ids` as `"status":
+        "closed"` automatically; when no primary-role leg is left open
+        afterwards, the whole run is closed. Default: not implemented —
+        strategies that don't need per-leg management never call this."""
         return None

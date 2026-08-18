@@ -7,6 +7,7 @@ whose `code_ref` matches the key used.
 
 from __future__ import annotations
 
+from app.strategies.atm_straddle_trigger_hedge import ATMStraddleTriggerHedge
 from app.strategies.base import Strategy
 from app.strategies.example_short_strangle import ExampleShortStrangle
 from app.strategies.single_leg_seller_hedge import SingleLegSellerWithHedge
@@ -15,6 +16,7 @@ from app.strategies.three_pair_rolling import ThreePairRollingStrategy
 STRATEGY_REGISTRY: dict[str, type[Strategy]] = {
     "example_short_strangle": ExampleShortStrangle,
     "single_leg_seller_hedge": SingleLegSellerWithHedge,
+    "atm_straddle_trigger_hedge": ATMStraddleTriggerHedge,
     "three_pair_rolling": ThreePairRollingStrategy,
 }
 
@@ -22,7 +24,11 @@ STRATEGY_REGISTRY: dict[str, type[Strategy]] = {
 # configure page instead of the generic inline quick-enable card on the
 # strategies list page. Each one's configure page lives at its own route —
 # see the configure_action lookup in app/templates/strategies/list.html.
-RICH_CONFIG_STRATEGIES: set[str] = {"single_leg_seller_hedge", "three_pair_rolling"}
+RICH_CONFIG_STRATEGIES: set[str] = {
+    "single_leg_seller_hedge",
+    "atm_straddle_trigger_hedge",
+    "three_pair_rolling",
+}
 
 
 def get_strategy_class(code_ref: str) -> type[Strategy]:
