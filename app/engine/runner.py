@@ -49,15 +49,14 @@ def find_open_run(user_strategy: UserStrategy) -> StrategyRun | None:
 
 
 def _today_run_count(user_strategy: UserStrategy) -> int:
-    """Counts today's runs toward a strategy's one-entry-per-day cap —
-    except ones ended via manual "Close Now", which don't burn that shot.
-    A run still open counts regardless (irrelevant either way: entry is
-    only ever evaluated when there's no open run to begin with)."""
+    """Counts today's runs toward a strategy's one-entry-per-day cap — every
+    run counts, however it ended (automatic exit or manual "Close Now").
+    Once you've closed a position today, the scheduler won't open another
+    one on its own; `enter_user_strategy_now` (the "Enter Now" button) is
+    the only way to trade again the same day, and it bypasses this count
+    deliberately, on a single explicit click."""
     today_ist = datetime.now(IST).date()
-    return sum(
-        1 for run in user_strategy.runs
-        if run.started_at.astimezone(IST).date() == today_ist and not run.manually_closed
-    )
+    return sum(1 for run in user_strategy.runs if run.started_at.astimezone(IST).date() == today_ist)
 
 
 def _opposite(transaction_type: str) -> str:
@@ -181,6 +180,44 @@ def _close_open_run(
     db.commit()
 
 
+def _execute_entry(
+    db: Session,
+    dhan_client: Any,
+    user_id: Any,
+    user_strategy_id: Any,
+    legs: list[OrderLeg],
+    entry_params: dict[str, Any],
+    *,
+    is_live: bool,
+) -> StrategyRun:
+    """Create the StrategyRun and place every leg's order. Shared by the
+    scheduler's automatic entry path and the manual "Enter Now" button so
+    both produce an identical run/order record."""
+    entry_premium = sum(leg.price for leg in legs if leg.transaction_type == "SELL") - sum(
+        leg.price for leg in legs if leg.transaction_type == "BUY"
+    )
+
+    run = StrategyRun(
+        user_strategy_id=user_strategy_id,
+        started_at=datetime.now(timezone.utc),
+        status="open",
+        legs_planned={
+            "legs": [asdict(leg) for leg in legs],
+            "entry_premium": entry_premium,
+            "params_snapshot": entry_params,
+        },
+        evaluation_notes=f"Entered {len(legs)} leg(s) in {'LIVE' if is_live else 'PAPER'} mode.",
+    )
+    db.add(run)
+    db.flush()  # assign run.id before orders reference it
+
+    for leg in legs:
+        _place_or_paper_leg(db, dhan_client, user_id, run.id, leg, is_live=is_live)
+
+    db.commit()
+    return run
+
+
 def run_user_strategy(db: Session, user_strategy: UserStrategy) -> None:
     if not user_strategy.is_active:
         return
@@ -240,28 +277,7 @@ def run_user_strategy(db: Session, user_strategy: UserStrategy) -> None:
         if not legs:
             return
 
-        entry_premium = sum(leg.price for leg in legs if leg.transaction_type == "SELL") - sum(
-            leg.price for leg in legs if leg.transaction_type == "BUY"
-        )
-
-        run = StrategyRun(
-            user_strategy_id=user_strategy.id,
-            started_at=datetime.now(timezone.utc),
-            status="open",
-            legs_planned={
-                "legs": [asdict(leg) for leg in legs],
-                "entry_premium": entry_premium,
-                "params_snapshot": entry_params,
-            },
-            evaluation_notes=f"Entered {len(legs)} leg(s) in {'LIVE' if is_live else 'PAPER'} mode.",
-        )
-        db.add(run)
-        db.flush()  # assign run.id before orders reference it
-
-        for leg in legs:
-            _place_or_paper_leg(db, user_dhan.client, user.id, run.id, leg, is_live=is_live)
-
-        db.commit()
+        _execute_entry(db, user_dhan.client, user.id, user_strategy.id, legs, entry_params, is_live=is_live)
 
     except Exception:
         db.rollback()
@@ -294,4 +310,47 @@ def close_user_strategy_now(db: Session, user_strategy: UserStrategy) -> bool:
         reason="Manually closed by user.",
         is_manual=True,
     )
+    return True
+
+
+def enter_user_strategy_now(db: Session, user_strategy: UserStrategy) -> bool:
+    """Manually trigger an entry check right now, outside the normal poll
+    cycle — the "Enter Now" button's action. Runs the exact same
+    `evaluate_entry` logic the scheduler uses (still requires the
+    strategy's real trigger conditions to actually be met — this is not a
+    blind market order), but deliberately passes `today_run_count=0`,
+    ignoring how many times this instance has already traded today.
+
+    That's a deliberate override: once a position closes (automatically
+    *or* manually), the scheduler will not re-enter this instance again on
+    its own for the rest of the day (see `_today_run_count`) — this is the
+    one explicit, single-click way around that, for exactly the attempt
+    the user asked for right now.
+
+    Returns True if a position was entered, False if conditions aren't
+    currently met (not an error — just "not yet"). Raises ValueError if
+    there's already an open position (close it first), or
+    DhanNotConnectedError if there's no active Dhan connection — same
+    error contract as `close_user_strategy_now`."""
+    if find_open_run(user_strategy) is not None:
+        raise ValueError("This instance already has an open position — close it first.")
+
+    user = user_strategy.user
+    strategy = user_strategy.strategy
+    strategy_cls = get_strategy_class(strategy.code_ref)
+
+    user_dhan = get_user_dhan_client(db, user)  # raises DhanNotConnectedError
+
+    settings = get_settings()
+    is_live = user_strategy.mode == StrategyMode.LIVE and settings.allow_live_trading
+    impl = strategy_cls()
+
+    entry_params = {**strategy.default_params, **user_strategy.params}
+    entry_ctx = StrategyContext(dhan_client=user_dhan.client, params=entry_params, today_run_count=0)
+
+    legs = impl.evaluate_entry(entry_ctx)
+    if not legs:
+        return False
+
+    _execute_entry(db, user_dhan.client, user.id, user_strategy.id, legs, entry_params, is_live=is_live)
     return True

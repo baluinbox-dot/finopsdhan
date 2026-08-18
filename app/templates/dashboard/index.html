@@ -93,6 +93,11 @@
                     <form method="post" action="{{ url('/strategies/' ~ us.id ~ '/close-now') }}" onsubmit="return confirm('Close this position now — all legs, including any hedge?');">
                         <button class="btn btn-sm btn-outline-danger" type="submit">Close Now</button>
                     </form>
+                    {% elif us.is_active %}
+                    <form method="post" action="{{ url('/strategies/' ~ us.id ~ '/enter-now') }}" onsubmit="return confirm('Check entry conditions right now and open a position if they\'re met?');">
+                        <button class="btn btn-sm btn-outline-primary" type="submit">Enter Now</button>
+                    </form>
+                    <div class="small text-body-secondary mt-1">Only if conditions are currently met.</div>
                     {% endif %}
                 </td>
             </tr>
