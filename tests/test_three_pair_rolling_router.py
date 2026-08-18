@@ -9,7 +9,7 @@ from unittest.mock import MagicMock
 
 from sqlalchemy import select
 
-from app.models import DhanCredential, Strategy, User
+from app.models import DhanCredential, Strategy, StrategyMode, User, UserStrategy
 
 CAPTCHA_ANSWER = "8"  # conftest.client patches random.randint to always return 4
 
@@ -127,4 +127,79 @@ def test_banknifty_preview_defaults_to_a_100pt_gap_not_50(client, db_session, mo
     assert "100pt gap" in resp.text
     # The Strike Gap field itself must also default to 100, not 50 -- the
     # actual strategy config, not just the preview text, must be correct.
+    assert 'name="strike_gap" value="100"' in resp.text
+
+
+def test_switching_underlying_on_an_existing_instance_redefaults_the_gap(client, db_session, monkeypatch):
+    """Regression test: a NIFTY instance saved before the 100pt-default fix
+    (or just saved with the NIFTY default of 50) still has strike_gap: 50 in
+    its persisted params. Reconfiguring that *same* instance and switching
+    the Underlying dropdown to BANKNIFTY must NOT drag the old NIFTY gap
+    along -- it must re-default to 100, otherwise the T==M bug reproduces
+    on every existing instance regardless of the earlier fix."""
+    _register_and_login(client, db_session, "trader3@example.com")
+    user = db_session.scalar(select(User).where(User.email == "trader3@example.com"))
+    db_session.add(DhanCredential(user_id=user.id, client_id="x", access_token_encrypted="y", is_active=True))
+    db_session.commit()
+
+    strategy = Strategy(
+        name="Dynamic T-M-B 3-Pair Rolling Strategy", code_ref="three_pair_rolling", is_published=True,
+    )
+    db_session.add(strategy)
+    db_session.commit()
+
+    existing = UserStrategy(
+        user_id=user.id,
+        strategy_id=strategy.id,
+        mode=StrategyMode.PAPER,
+        is_active=True,
+        label="3-Pair Rolling NIFTY",
+        params={
+            "underlying": "NIFTY",
+            "expiry": "2026-08-25",
+            "lots": 1,
+            "start_time": "09:20",
+            "end_time": "14:45",
+            "strike_gap": 50.0,
+            "daily_stop_loss": 10000.0,
+            "daily_target": 15000.0,
+        },
+    )
+    db_session.add(existing)
+    db_session.commit()
+
+    dhan = MagicMock()
+    dhan.expiry_list.return_value = {"status": "success", "data": {"status": "success", "data": ["2026-08-27"]}}
+    strikes = [57000, 57100, 57200, 57300, 57400, 57500, 57600]
+    dhan.option_chain.return_value = {
+        "status": "success",
+        "data": {
+            "status": "success",
+            "data": {
+                "last_price": 57262.40,
+                "oc": {
+                    f"{s}.000000": {
+                        "ce": {"security_id": 10000 + s, "last_price": 60.0, "greeks": {}},
+                        "pe": {"security_id": 20000 + s, "last_price": 55.0, "greeks": {}},
+                    }
+                    for s in strikes
+                },
+            },
+        },
+    }
+    monkeypatch.setattr(
+        "app.routers.strategies.get_user_dhan_client",
+        lambda db, user: MagicMock(client=dhan),
+    )
+
+    resp = client.get(
+        f"/strategies/{strategy.id}/configure-rolling"
+        f"?user_strategy_id={existing.id}&underlying=BANKNIFTY&expiry=2026-08-27"
+    )
+
+    assert resp.status_code == 200
+    assert "T <strong>57400</strong>" in resp.text
+    assert "M (ATM) <strong>57300</strong>" in resp.text
+    assert "B <strong>57200</strong>" in resp.text
+    assert "100pt gap" in resp.text
     assert 'name="strike_gap" value="100"' in resp.text

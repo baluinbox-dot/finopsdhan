@@ -531,14 +531,17 @@ def configure_rolling_form(
         class_defaults = {}
     params = {**class_defaults, **strategy.default_params, **existing_params}
     params["underlying"] = underlying
-    if "strike_gap" not in existing_params:
-        # NIFTY/FINNIFTY trade in 50-point strikes, BANKNIFTY/SENSEX in
-        # 100 — defaulting everyone to 50 meant a fresh BANKNIFTY/SENSEX
-        # instance silently searched for a strike that doesn't exist (e.g.
-        # ATM+50 with only 100-point strikes available lands exactly
-        # between two real strikes), producing a nonsensical T==M preview.
-        # Only overridden for a brand-new instance — an existing saved gap
-        # is always respected as-is.
+    # NIFTY/FINNIFTY trade in 50-point strikes, BANKNIFTY/SENSEX in 100 —
+    # defaulting everyone to 50 meant a BANKNIFTY/SENSEX preview silently
+    # searched for a strike that doesn't exist (e.g. ATM+50 with only
+    # 100-point strikes available lands exactly between two real strikes),
+    # producing a nonsensical T==M preview. A saved strike_gap is only
+    # respected as-is when it was saved *for this same underlying* — if the
+    # user switches the Underlying dropdown to a different instrument (new
+    # instance, or reconfiguring an existing one), the gap it inherited from
+    # whatever underlying it was saved with is meaningless here and must be
+    # re-defaulted for the underlying actually being previewed.
+    if "strike_gap" not in existing_params or existing_params.get("underlying") != underlying:
         params["strike_gap"] = 100 if underlying in ("BANKNIFTY", "SENSEX") else 50
 
     expiries: list[str] = []
