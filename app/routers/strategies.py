@@ -554,9 +554,9 @@ def configure_rolling_form(
                     strikes = sorted(chain_df["strike"].tolist())
                     atm_strike = min(strikes, key=lambda x: abs(x - spot))
                     gap = 50  # preview only, before the user's own strike_gap input is known
-                    fin1 = min(strikes, key=lambda x: abs(x - (atm_strike + gap)))
-                    fin3 = min(strikes, key=lambda x: abs(x - (atm_strike - gap)))
-                    atm_preview = {"spot": spot, "fin1": fin1, "fin2": atm_strike, "fin3": fin3}
+                    top = min(strikes, key=lambda x: abs(x - (atm_strike + gap)))
+                    bottom = min(strikes, key=lambda x: abs(x - (atm_strike - gap)))
+                    atm_preview = {"spot": spot, "top": top, "middle": atm_strike, "bottom": bottom}
             except Exception as exc:  # noqa: BLE001 — preview is a nice-to-have, never block the form
                 expiry_error = expiry_error or f"Could not fetch live strikes: {exc}"
 

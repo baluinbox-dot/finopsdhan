@@ -60,6 +60,14 @@ def _before_start_time():
     return now.replace(hour=9, minute=0, second=0, microsecond=0)
 
 
+def _ce_id(strike: int) -> str:
+    return str(1000 + strike // 50)
+
+
+def _pe_id(strike: int) -> str:
+    return str(2000 + strike // 50)
+
+
 @pytest.fixture(autouse=True)
 def _patch_lot_size():
     with patch("app.strategies.three_pair_rolling.get_lot_size", return_value=75):
@@ -69,7 +77,7 @@ def _patch_lot_size():
 # --- entry ---
 
 
-def test_entry_creates_three_pairs_at_atm_plus_minus_gap():
+def test_entry_creates_a_t_m_b_window_at_atm_plus_minus_gap():
     dhan = _mock_dhan_client(spot=24400.0)
     ctx = StrategyContext(dhan_client=dhan, params={"expiry": "2026-08-27", "strike_gap": 50}, today_run_count=0)
     strategy = ThreePairRollingStrategy()
@@ -78,22 +86,18 @@ def test_entry_creates_three_pairs_at_atm_plus_minus_gap():
         legs = strategy.evaluate_entry(ctx)
 
     assert legs is not None
-    assert len(legs) == 6  # 3 pairs x (CE + PE)
+    assert len(legs) == 6  # B/M/T x (CE + PE)
     assert {leg.transaction_type for leg in legs} == {"SELL"}
-
-    by_pair: dict[str, list] = {}
-    for leg in legs:
-        by_pair.setdefault(leg.pair_id, []).append(leg)
-
-    assert set(by_pair) == {"FIN1", "FIN2", "FIN3"}
-    assert all(len(v) == 2 for v in by_pair.values())
 
     def strike_of(leg):
         return int(leg.trading_symbol.split()[1])
 
-    assert {strike_of(leg) for leg in by_pair["FIN1"]} == {24450}
-    assert {strike_of(leg) for leg in by_pair["FIN2"]} == {24400}
-    assert {strike_of(leg) for leg in by_pair["FIN3"]} == {24350}
+    strikes = sorted({strike_of(leg) for leg in legs})
+    assert strikes == [24350, 24400, 24450]
+    # Each strike has exactly a CE and a PE.
+    for strike in strikes:
+        sides = {leg.trading_symbol.split()[2] for leg in legs if strike_of(leg) == strike}
+        assert sides == {"CE", "PE"}
 
 
 def test_entry_blocked_before_start_time():
@@ -123,112 +127,150 @@ def test_entry_requires_expiry():
 # --- helpers for exit/roll tests ---
 
 
-def _pair_legs(pair_id: str, strike: int, ce_price: float = 60.0, pe_price: float = 55.0, quantity: int = 75) -> list[dict]:
-    idx = strike // 50
+def _strike_legs(strike: int, role: str = "T", ce_price: float = 60.0, pe_price: float = 55.0, quantity: int = 75) -> list[dict]:
     return [
-        {"label": f"{pair_id} SELL {strike} CE", "security_id": str(1000 + idx), "trading_symbol": f"NIFTY {strike} CE 2026-08-27",
+        {"label": f"{role} SELL {strike} CE", "security_id": _ce_id(strike), "trading_symbol": f"NIFTY {strike} CE 2026-08-27",
          "exchange_segment": "NSE_FNO", "transaction_type": "SELL", "quantity": quantity, "order_type": "LIMIT",
-         "product_type": "INTRADAY", "price": ce_price, "role": "primary", "pair_id": pair_id},
-        {"label": f"{pair_id} SELL {strike} PE", "security_id": str(2000 + idx), "trading_symbol": f"NIFTY {strike} PE 2026-08-27",
+         "product_type": "INTRADAY", "price": ce_price, "role": "primary"},
+        {"label": f"{role} SELL {strike} PE", "security_id": _pe_id(strike), "trading_symbol": f"NIFTY {strike} PE 2026-08-27",
          "exchange_segment": "NSE_FNO", "transaction_type": "SELL", "quantity": quantity, "order_type": "LIMIT",
-         "product_type": "INTRADAY", "price": pe_price, "role": "primary", "pair_id": pair_id},
+         "product_type": "INTRADAY", "price": pe_price, "role": "primary"},
     ]
 
 
-def _three_pair_notes(**overrides) -> dict:
-    legs = _pair_legs("FIN1", 24450) + _pair_legs("FIN2", 24400) + _pair_legs("FIN3", 24350)
+def _window_notes(b: int = 24350, m: int = 24400, t: int = 24450, **overrides) -> dict:
+    legs = _strike_legs(b, "B") + _strike_legs(m, "M") + _strike_legs(t, "T")
     notes = {"legs": legs, "entry_premium": 0}
     notes.update(overrides)
     return notes
 
 
-# --- rolling ---
+# --- rolling: downward shift ---
 
 
-def test_rolls_pair_down_when_spot_moves_two_gaps_below_its_strike():
+def test_downward_shift_closes_top_opens_new_bottom():
     strategy = ThreePairRollingStrategy()
-    # FIN1 at 24450; spot 24350 = 24450 - 2*50 -> should roll to nearest(24350-50)=24300.
+    # Window B=24350 M=24400 T=24450; spot reaches B (24350) -> shift down.
     dhan = _mock_dhan_client(spot=24350.0)
     ctx = StrategyContext(dhan_client=dhan, params={"expiry": "2026-08-27", "strike_gap": 50})
 
-    decision = strategy.evaluate_rolls(ctx, _three_pair_notes())
+    decision = strategy.evaluate_rolls(ctx, _window_notes())
 
     assert decision is not None
     assert len(decision["rolls"]) == 1
     roll = decision["rolls"][0]
-    assert set(roll["close_security_ids"]) == {"1489", "2489"}  # FIN1's 24450 legs (idx=489)
+    assert set(roll["close_security_ids"]) == {_ce_id(24450), _pe_id(24450)}  # old T closed
     new_strikes = {int(leg.trading_symbol.split()[1]) for leg in roll["new_legs"]}
-    assert new_strikes == {24300}
-    assert {leg.pair_id for leg in roll["new_legs"]} == {"FIN1"}
+    assert new_strikes == {24300}  # new B = old B - gap
 
 
-def test_rolls_pair_up_when_spot_moves_two_gaps_above_its_strike():
+def test_upward_shift_closes_bottom_opens_new_top():
     strategy = ThreePairRollingStrategy()
-    # FIN3 at 24350; spot 24450 = 24350 + 2*50 -> should roll to nearest(24450+50)=24500.
+    # Window B=24350 M=24400 T=24450; spot reaches T (24450) -> shift up.
     dhan = _mock_dhan_client(spot=24450.0)
     ctx = StrategyContext(dhan_client=dhan, params={"expiry": "2026-08-27", "strike_gap": 50})
 
-    decision = strategy.evaluate_rolls(ctx, _three_pair_notes())
+    decision = strategy.evaluate_rolls(ctx, _window_notes())
 
     assert decision is not None
     assert len(decision["rolls"]) == 1
     roll = decision["rolls"][0]
+    assert set(roll["close_security_ids"]) == {_ce_id(24350), _pe_id(24350)}  # old B closed
     new_strikes = {int(leg.trading_symbol.split()[1]) for leg in roll["new_legs"]}
-    assert new_strikes == {24500}
-    assert {leg.pair_id for leg in roll["new_legs"]} == {"FIN3"}
+    assert new_strikes == {24500}  # new T = old T + gap
 
 
-def test_no_roll_when_spot_within_two_gaps_of_every_pair():
+def test_no_shift_when_spot_inside_window():
     strategy = ThreePairRollingStrategy()
-    dhan = _mock_dhan_client(spot=24400.0)  # unchanged from entry
+    dhan = _mock_dhan_client(spot=24400.0)  # exactly M, strictly inside (B, T)
     ctx = StrategyContext(dhan_client=dhan, params={"expiry": "2026-08-27", "strike_gap": 50})
-    assert strategy.evaluate_rolls(ctx, _three_pair_notes()) is None
+    assert strategy.evaluate_rolls(ctx, _window_notes()) is None
 
 
-def test_roll_blocked_when_target_strike_already_owned_by_another_pair():
+def test_matches_the_spec_worked_example_continuous_downward_rolling():
+    """From the requirements doc: B=24350,M=24400,T=24450 -> spot 24350 ->
+    T=24400,M=24350,B=24300 -> spot 24300 -> T=24350,M=24300,B=24250."""
     strategy = ThreePairRollingStrategy()
-    # FIN1 due to roll to 24300 (spot 24350), but FIN3 already held 24300 earlier today
-    # (recorded in leg history even though FIN3 has since moved elsewhere / is still open at 24350).
+
+    dhan = _mock_dhan_client(spot=24350.0)
+    ctx = StrategyContext(dhan_client=dhan, params={"expiry": "2026-08-27", "strike_gap": 50})
+    decision = strategy.evaluate_rolls(ctx, _window_notes(b=24350, m=24400, t=24450))
+    assert decision is not None
+    roll = decision["rolls"][0]
+    assert {int(l.trading_symbol.split()[1]) for l in roll["new_legs"]} == {24300}
+
+    # Apply the shift by hand to build the next state: B=24300,M=24350,T=24400.
+    dhan2 = _mock_dhan_client(spot=24300.0)
+    ctx2 = StrategyContext(dhan_client=dhan2, params={"expiry": "2026-08-27", "strike_gap": 50})
+    decision2 = strategy.evaluate_rolls(ctx2, _window_notes(b=24300, m=24350, t=24400))
+    assert decision2 is not None
+    roll2 = decision2["rolls"][0]
+    assert set(roll2["close_security_ids"]) == {_ce_id(24400), _pe_id(24400)}
+    assert {int(l.trading_symbol.split()[1]) for l in roll2["new_legs"]} == {24250}
+
+
+def test_reversal_can_reopen_a_previously_used_strike():
+    """From the spec's complete-flow example: after two downward shifts
+    (window now B=24250,M=24300,T=24350), spot reverses back up to 24350
+    (= current T) -> close B(24250), open new T=24400 -- even though
+    24400 was part of the window earlier today and has since been closed.
+    There is no "different pair" identity to block this in the T-M-B
+    model; the shift is legitimate."""
+    strategy = ThreePairRollingStrategy()
     dhan = _mock_dhan_client(spot=24350.0)
     ctx = StrategyContext(dhan_client=dhan, params={"expiry": "2026-08-27", "strike_gap": 50})
 
-    notes = _three_pair_notes()
-    # Append a historical (already-closed) FIN3 leg pair at 24300, owned by FIN3.
-    historical = _pair_legs("FIN3", 24300)
-    notes["legs"] = notes["legs"] + historical
-    notes["leg_state"] = {leg["security_id"]: {"status": "closed"} for leg in historical}
-
-    decision = strategy.evaluate_rolls(ctx, notes)
-    assert decision is None  # FIN1's roll to 24300 is blocked; nothing else due this pass
-
-
-def test_roll_allowed_when_pair_revisits_its_own_past_strike():
-    strategy = ThreePairRollingStrategy()
-    dhan = _mock_dhan_client(spot=24350.0)
-    ctx = StrategyContext(dhan_client=dhan, params={"expiry": "2026-08-27", "strike_gap": 50})
-
-    notes = _three_pair_notes()
-    # FIN1 itself previously held 24300 earlier today -> revisiting it now is fine.
-    historical = _pair_legs("FIN1", 24300)
+    notes = _window_notes(b=24250, m=24300, t=24350)
+    # Leg history also contains the earlier (now-closed) 24450 and 24400 pairs.
+    historical = _strike_legs(24450, "T") + _strike_legs(24400, "T")
     notes["legs"] = notes["legs"] + historical
     notes["leg_state"] = {leg["security_id"]: {"status": "closed"} for leg in historical}
 
     decision = strategy.evaluate_rolls(ctx, notes)
     assert decision is not None
-    assert len(decision["rolls"]) == 1
+    roll = decision["rolls"][0]
+    assert set(roll["close_security_ids"]) == {_ce_id(24250), _pe_id(24250)}
+    assert {int(l.trading_symbol.split()[1]) for l in roll["new_legs"]} == {24400}
 
 
-def test_no_roll_for_pair_already_closed():
+def test_big_gap_produces_multiple_sequential_shifts_without_collision():
+    strategy = ThreePairRollingStrategy()
+    # Window B=24350 M=24400 T=24450; spot gaps down to 24275 in a single
+    # poll -> two downward shifts (24275 clears the original B(24350) and
+    # the next B(24300), but not the B after that (24250), so exactly 2).
+    dhan = _mock_dhan_client(spot=24275.0)
+    ctx = StrategyContext(dhan_client=dhan, params={"expiry": "2026-08-27", "strike_gap": 50})
+
+    decision = strategy.evaluate_rolls(ctx, _window_notes())
+
+    assert decision is not None
+    assert len(decision["rolls"]) == 2
+
+    # First shift: close T(24450), open new B(24300).
+    assert set(decision["rolls"][0]["close_security_ids"]) == {_ce_id(24450), _pe_id(24450)}
+    assert {int(l.trading_symbol.split()[1]) for l in decision["rolls"][0]["new_legs"]} == {24300}
+
+    # Second shift computed off the *updated* window (B=24300,M=24350,T=24400):
+    # spot 24250 still <= new B(24300) -> close new T(24400), open new B(24250).
+    assert set(decision["rolls"][1]["close_security_ids"]) == {_ce_id(24400), _pe_id(24400)}
+    assert {int(l.trading_symbol.split()[1]) for l in decision["rolls"][1]["new_legs"]} == {24250}
+
+    # The two shifts never target the same strike.
+    targets = [{int(l.trading_symbol.split()[1]) for l in r["new_legs"]} for r in decision["rolls"]]
+    assert targets[0] != targets[1]
+
+
+def test_no_roll_when_window_is_not_exactly_three_strikes():
     strategy = ThreePairRollingStrategy()
     dhan = _mock_dhan_client(spot=24350.0)
     ctx = StrategyContext(dhan_client=dhan, params={"expiry": "2026-08-27", "strike_gap": 50})
 
-    notes = _three_pair_notes()
-    fin1_ids = {leg["security_id"] for leg in _pair_legs("FIN1", 24450)}
-    notes["leg_state"] = {sid: {"status": "closed"} for sid in fin1_ids}
+    notes = _window_notes()
+    # Mark the T leg's already closed (e.g. daily SL was about to finish the run) -- malformed window, don't touch.
+    t_ids = {leg["security_id"] for leg in _strike_legs(24450, "T")}
+    notes["leg_state"] = {sid: {"status": "closed"} for sid in t_ids}
 
-    decision = strategy.evaluate_rolls(ctx, notes)
-    assert decision is None  # FIN1 already fully closed (e.g. daily SL about to finish the run) -- nothing to roll
+    assert strategy.evaluate_rolls(ctx, notes) is None
 
 
 # --- daily stop-loss / target / end time ---
@@ -238,38 +280,33 @@ def test_exit_forced_at_end_time():
     strategy = ThreePairRollingStrategy()
     ctx = StrategyContext(dhan_client=MagicMock(), params={"end_time": "14:45"})
     with patch("app.strategies.three_pair_rolling._now_ist", return_value=_within_window_time().replace(hour=15)):
-        assert strategy.evaluate_exit(ctx, _three_pair_notes()) is True
+        assert strategy.evaluate_exit(ctx, _window_notes()) is True
 
 
 def test_exit_daily_stop_loss_triggers_on_live_unrealized_pnl():
     strategy = ThreePairRollingStrategy()
     dhan = MagicMock()
-    # All 6 legs (entry ~60/55 each) now priced way higher -> big unrealized loss.
     quotes = {}
-    for pair, strike in (("FIN1", 24450), ("FIN2", 24400), ("FIN3", 24350)):
-        idx = strike // 50
-        quotes[str(1000 + idx)] = {"last_price": 200.0}
-        quotes[str(2000 + idx)] = {"last_price": 200.0}
+    for strike in (24350, 24400, 24450):
+        quotes[_ce_id(strike)] = {"last_price": 200.0}
+        quotes[_pe_id(strike)] = {"last_price": 200.0}
     dhan.quote_data.return_value = {"status": "success", "data": {"status": "success", "data": {"NSE_FNO": quotes}}}
 
     ctx = StrategyContext(dhan_client=dhan, params={"daily_stop_loss": 10000, "daily_target": 0, "end_time": "14:45"})
     with patch("app.strategies.three_pair_rolling._now_ist", return_value=_within_window_time()):
-        assert strategy.evaluate_exit(ctx, _three_pair_notes()) is True
+        assert strategy.evaluate_exit(ctx, _window_notes()) is True
 
 
 def test_exit_daily_target_triggers_including_realized_so_far():
     strategy = ThreePairRollingStrategy()
     dhan = MagicMock()
     quotes = {}
-    for pair, strike in (("FIN1", 24450), ("FIN2", 24400), ("FIN3", 24350)):
-        idx = strike // 50
-        quotes[str(1000 + idx)] = {"last_price": 5.0}
-        quotes[str(2000 + idx)] = {"last_price": 5.0}
+    for strike in (24350, 24400, 24450):
+        quotes[_ce_id(strike)] = {"last_price": 5.0}
+        quotes[_pe_id(strike)] = {"last_price": 5.0}
     dhan.quote_data.return_value = {"status": "success", "data": {"status": "success", "data": {"NSE_FNO": quotes}}}
 
-    # Combined entry ~115 * 3 pairs * 75 qty ~ already large unrealized profit even
-    # without prior realized P&L, but also check realized_pnl_so_far is additive.
-    notes = _three_pair_notes(realized_pnl_so_far=5000)
+    notes = _window_notes(realized_pnl_so_far=5000)
     ctx = StrategyContext(dhan_client=dhan, params={"daily_stop_loss": 0, "daily_target": 15000, "end_time": "14:45"})
     with patch("app.strategies.three_pair_rolling._now_ist", return_value=_within_window_time()):
         assert strategy.evaluate_exit(ctx, notes) is True
@@ -279,15 +316,14 @@ def test_exit_holds_when_within_bounds():
     strategy = ThreePairRollingStrategy()
     dhan = MagicMock()
     quotes = {}
-    for pair, strike in (("FIN1", 24450), ("FIN2", 24400), ("FIN3", 24350)):
-        idx = strike // 50
-        quotes[str(1000 + idx)] = {"last_price": 58.0}
-        quotes[str(2000 + idx)] = {"last_price": 53.0}
+    for strike in (24350, 24400, 24450):
+        quotes[_ce_id(strike)] = {"last_price": 58.0}
+        quotes[_pe_id(strike)] = {"last_price": 53.0}
     dhan.quote_data.return_value = {"status": "success", "data": {"status": "success", "data": {"NSE_FNO": quotes}}}
 
     ctx = StrategyContext(dhan_client=dhan, params={"daily_stop_loss": 10000, "daily_target": 15000, "end_time": "14:45"})
     with patch("app.strategies.three_pair_rolling._now_ist", return_value=_within_window_time()):
-        assert strategy.evaluate_exit(ctx, _three_pair_notes()) is False
+        assert strategy.evaluate_exit(ctx, _window_notes()) is False
 
 
 def test_exit_missing_quote_holds_rather_than_guessing():
@@ -296,4 +332,4 @@ def test_exit_missing_quote_holds_rather_than_guessing():
     dhan.quote_data.return_value = {"status": "success", "data": {"status": "success", "data": {"NSE_FNO": {}}}}
     ctx = StrategyContext(dhan_client=dhan, params={"daily_stop_loss": 1, "daily_target": 1, "end_time": "14:45"})
     with patch("app.strategies.three_pair_rolling._now_ist", return_value=_within_window_time()):
-        assert strategy.evaluate_exit(ctx, _three_pair_notes()) is False
+        assert strategy.evaluate_exit(ctx, _window_notes()) is False

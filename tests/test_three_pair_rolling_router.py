@@ -38,7 +38,7 @@ def test_admin_can_publish_and_user_can_open_configure_page(client, db_session):
     resp = client.post(
         "/strategies/admin/create",
         data={
-            "name": "3-Pair Dynamic Rolling Strategy",
+            "name": "Dynamic T-M-B 3-Pair Rolling Strategy",
             "description": "test",
             "code_ref": "three_pair_rolling",
             "default_params_json": "{}",
