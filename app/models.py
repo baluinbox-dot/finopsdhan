@@ -152,6 +152,14 @@ class StrategyRun(Base):
     legs_planned: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     evaluation_notes: Mapped[str] = mapped_column(Text, default="", nullable=False)
 
+    # True only when this run was ended via the "Close Now" button, not an
+    # automatic exit (stop-loss/target/window-end/per-leg rule). A
+    # strategy's one-entry-per-day cap (app.engine.runner._today_run_count)
+    # excludes manually-closed runs — a deliberate manual intervention
+    # shouldn't burn the day's one shot the way the strategy's own exit
+    # signal does.
+    manually_closed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
     user_strategy: Mapped["UserStrategy"] = relationship(back_populates="runs")
     orders: Mapped[list["Order"]] = relationship(back_populates="strategy_run", cascade="all, delete-orphan")
 
