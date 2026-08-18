@@ -10,16 +10,19 @@ from __future__ import annotations
 from app.strategies.base import Strategy
 from app.strategies.example_short_strangle import ExampleShortStrangle
 from app.strategies.single_leg_seller_hedge import SingleLegSellerWithHedge
+from app.strategies.three_pair_rolling import ThreePairRollingStrategy
 
 STRATEGY_REGISTRY: dict[str, type[Strategy]] = {
     "example_short_strangle": ExampleShortStrangle,
     "single_leg_seller_hedge": SingleLegSellerWithHedge,
+    "three_pair_rolling": ThreePairRollingStrategy,
 }
 
 # code_refs whose configuration is rich enough to need a dedicated
-# configure page (GET/POST /strategies/{id}/configure) instead of the
-# generic inline quick-enable card on the strategies list page.
-RICH_CONFIG_STRATEGIES: set[str] = {"single_leg_seller_hedge"}
+# configure page instead of the generic inline quick-enable card on the
+# strategies list page. Each one's configure page lives at its own route —
+# see the configure_action lookup in app/templates/strategies/list.html.
+RICH_CONFIG_STRATEGIES: set[str] = {"single_leg_seller_hedge", "three_pair_rolling"}
 
 
 def get_strategy_class(code_ref: str) -> type[Strategy]:
