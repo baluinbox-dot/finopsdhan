@@ -1,8 +1,38 @@
 from __future__ import annotations
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from app.models import User, UserRole
+
+
+def test_register_race_condition_shows_friendly_error_not_500(client, db_session, monkeypatch):
+    """The existing-email pre-check isn't atomic with the insert — simulate
+    a near-simultaneous double submit slipping past it (both requests see
+    no existing row before either commits) by making the commit itself
+    raise the database's own unique-constraint violation. Must show the
+    same friendly flash as the normal duplicate-email case, not crash."""
+    original_commit = db_session.commit
+    calls = {"n": 0}
+
+    def flaky_commit():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise IntegrityError("INSERT INTO users ...", {}, Exception("duplicate key value violates unique constraint"))
+        return original_commit()
+
+    monkeypatch.setattr(db_session, "commit", flaky_commit)
+
+    resp = client.post(
+        "/auth/register",
+        data={"email": "raced@example.com", "password": "supersecret1", "confirm_password": "supersecret1"},
+        follow_redirects=False,
+    )
+
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/auth/register"
+    # The failed insert must not leave a half-committed row behind.
+    assert db_session.scalar(select(User).where(User.email == "raced@example.com")) is None
 
 
 def test_register_superadmin_and_regular_user(client, db_session):

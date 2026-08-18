@@ -10,6 +10,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import RedirectResponse
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from app.config import get_settings
 from app.deps import CurrentUserOptional, DbSession
@@ -59,7 +60,19 @@ def register_submit(
 
     user = User(email=email, password_hash=hash_password(password), role=role)
     db.add(user)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        # The pre-check above isn't atomic with this insert — a
+        # near-simultaneous double submit (e.g. a double-click, or a retry
+        # after a slow/failed first attempt) can pass the "does it exist?"
+        # check twice before either commits, and the second one hits the
+        # database's own unique constraint instead. Without this, that
+        # crashes with an unhandled 500 rather than the same friendly
+        # message the pre-check already gives for the non-race case.
+        db.rollback()
+        flash(request, "An account with that email already exists.", "error")
+        return RedirectResponse(url("/auth/register"), status_code=303)
 
     flash(request, "Account created. Please log in.", "success")
     return RedirectResponse(url("/auth/login"), status_code=303)
