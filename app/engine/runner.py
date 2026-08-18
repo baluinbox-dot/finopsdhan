@@ -137,14 +137,15 @@ def _close_open_run(
     is_manual: bool = False,
 ) -> None:
     """Reverse every leg on `open_run` that isn't already closed (primary
-    and hedge alike) and mark the run closed. Shared by both the scheduled
-    exit path and the manual "Close Now" path so they behave identically
-    (aside from `is_manual`, which only affects whether this run counts
-    toward the strategy's one-entry-per-day cap — see `_today_run_count`).
-    Legs a strategy already squared off individually (per-leg exit, or a
-    completed roll — tracked in `leg_state`) are skipped; strategies that
-    never populate `leg_state` have every leg default to open, so this
-    behaves exactly as a plain "reverse everything" for them."""
+    and hedge alike) and mark the run closed. Shared by the scheduled
+    whole-position exit path and the manual "Close Now" path so they
+    behave identically (aside from `is_manual`, which only affects whether
+    this run counts toward the strategy's one-entry-per-day cap — see
+    `_today_run_count`). Legs a strategy already squared off individually
+    (a per-leg exit via `evaluate_leg_exits`, or a completed roll via
+    `evaluate_rolls` — both tracked in `leg_state`) are skipped; most
+    strategies never populate `leg_state`, so every leg defaults to open
+    and this behaves exactly as a plain "reverse everything" for them."""
     notes = open_run.legs_planned or {}
     leg_state = notes.get("leg_state") or {}
     legs_data = [
@@ -318,6 +319,82 @@ def _apply_rolls(
     db.commit()
 
 
+def _apply_leg_exits(
+    db: Session,
+    dhan_client: Any,
+    user_id: Any,
+    open_run: StrategyRun,
+    decision: dict[str, Any],
+    *,
+    is_live: bool,
+) -> None:
+    """Reverse only the legs a strategy's `evaluate_leg_exits` named, apply
+    its `leg_state_patch`, and close the whole run once no primary-role leg
+    is left open. See `Strategy.evaluate_leg_exits` for the decision shape."""
+    notes = dict(open_run.legs_planned or {})  # copy so reassignment below is detected as a change
+    legs_data = notes.get("legs", [])
+    leg_state: dict[str, Any] = {sid: dict(state) for sid, state in (notes.get("leg_state") or {}).items()}
+
+    close_ids = {str(sid) for sid in (decision.get("close_security_ids") or [])}
+    to_close = [
+        leg for leg in legs_data
+        if str(leg["security_id"]) in close_ids and _open_leg_state(str(leg["security_id"]), leg_state)["status"] == "open"
+    ]
+
+    pnl_delta = 0.0
+    if to_close:
+        securities_by_segment: dict[str, list[int]] = {}
+        for leg in to_close:
+            securities_by_segment.setdefault(leg["exchange_segment"], []).append(int(leg["security_id"]))
+        quotes = fetch_quotes(dhan_client, securities_by_segment)
+
+        for leg_data in to_close:
+            quote = quotes.get((leg_data["exchange_segment"], str(leg_data["security_id"])))
+            if quote is not None:
+                exit_price = float(quote.get("last_price", leg_data["price"]))
+            else:
+                exit_price = leg_data["price"]
+                logger.warning(
+                    "Could not fetch fresh exit quote for %s; using last known price.", leg_data["security_id"]
+                )
+
+            exit_leg = OrderLeg(
+                label=f"EXIT {leg_data['label']}",
+                security_id=leg_data["security_id"],
+                trading_symbol=leg_data["trading_symbol"],
+                exchange_segment=leg_data["exchange_segment"],
+                transaction_type=_opposite(leg_data["transaction_type"]),
+                quantity=leg_data["quantity"],
+                order_type=leg_data["order_type"],
+                product_type=leg_data["product_type"],
+                price=exit_price,
+                role=leg_data.get("role", "primary"),
+            )
+            _place_or_paper_leg(db, dhan_client, user_id, open_run.id, exit_leg, is_live=is_live)
+            pnl_delta += leg_pnl(leg_data, exit_price)
+            sid = str(leg_data["security_id"])
+            leg_state[sid] = {**_open_leg_state(sid, leg_state), "status": "closed"}
+
+    for sid, patch in (decision.get("leg_state_patch") or {}).items():
+        sid = str(sid)
+        leg_state[sid] = {**_open_leg_state(sid, leg_state), **patch}
+
+    notes["leg_state"] = leg_state
+    open_run.legs_planned = notes
+    open_run.realized_pnl = float(open_run.realized_pnl or 0) + pnl_delta
+
+    primary_ids = {str(leg["security_id"]) for leg in legs_data if leg.get("role") == "primary"}
+    still_open_primary = [sid for sid in primary_ids if leg_state.get(sid, {"status": "open"})["status"] == "open"]
+
+    if to_close and not still_open_primary:
+        open_run.status = "closed"
+        open_run.evaluation_notes = "All primary legs closed via per-leg exit rules."
+        open_run.closed_at = datetime.now(timezone.utc)
+    elif to_close:
+        open_run.evaluation_notes = f"Partial exit: closed {len(to_close)} leg(s) on per-leg exit rules."
+    db.commit()
+
+
 def run_user_strategy(db: Session, user_strategy: UserStrategy) -> None:
     if not user_strategy.is_active:
         return
@@ -365,8 +442,13 @@ def run_user_strategy(db: Session, user_strategy: UserStrategy) -> None:
                 return
 
             # Whole-position exit didn't fire — give strategies that manage
-            # legs independently a chance to roll a subset of them (close a
-            # group, open its replacement) without ending the run.
+            # legs independently a chance to act on a subset of them: close
+            # some (e.g. a per-leg stop-loss) and/or roll a group (close +
+            # immediately reopen its replacement), without ending the run.
+            leg_decision = impl.evaluate_leg_exits(exit_ctx, open_run.legs_planned or {})
+            if leg_decision:
+                _apply_leg_exits(db, user_dhan.client, user.id, open_run, leg_decision, is_live=is_live)
+
             roll_decision = impl.evaluate_rolls(exit_ctx, open_run.legs_planned or {})
             if roll_decision:
                 _apply_rolls(db, user_dhan.client, user.id, open_run, roll_decision, is_live=is_live)

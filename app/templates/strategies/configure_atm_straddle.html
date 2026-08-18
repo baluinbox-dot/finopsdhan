@@ -1,0 +1,189 @@
+{% extends "base.html" %}
+{% block title %}Configure {{ strategy.name }} — FinOps Dhan Algo{% endblock %}
+{% block content %}
+<h4 class="mb-1">{{ 'Reconfigure: ' ~ (existing.label or strategy.name) if existing else 'Add New Instance: ' ~ strategy.name }}</h4>
+<p class="text-body-secondary">{{ strategy.description }}</p>
+{% if not existing %}
+<p class="small text-body-secondary">
+    This creates a <strong>new, independent instance</strong> — any other instances of this strategy you
+    already have running keep running untouched.
+</p>
+{% endif %}
+
+{% if not has_dhan %}
+<div class="alert alert-warning">
+    Connect your Dhan account on the <a href="{{ url('/settings/dhan') }}">Settings page</a> before configuring this strategy —
+    the expiry and ATM premium info below is fetched live from your own Dhan connection.
+</div>
+{% else %}
+
+<div class="card stat-card mb-3" style="max-width: 720px;">
+    <div class="card-body">
+        <form method="get" action="{{ url('/strategies/' ~ strategy.id ~ '/configure-straddle') }}" class="row g-2 align-items-end">
+            <input type="hidden" name="user_strategy_id" value="{{ user_strategy_id }}">
+            <div class="col-auto">
+                <label class="form-label small mb-0">Underlying</label>
+                <select name="underlying" class="form-select form-select-sm" onchange="this.form.submit()">
+                    {% for key, meta in underlyings.items() %}
+                    <option value="{{ key }}" {{ 'selected' if key == selected_underlying else '' }}>{{ meta.label }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-auto">
+                <label class="form-label small mb-0">Expiry</label>
+                <select name="expiry" class="form-select form-select-sm" onchange="this.form.submit()" {{ 'disabled' if not expiries else '' }}>
+                    {% for exp in expiries %}
+                    <option value="{{ exp }}" {{ 'selected' if exp == selected_expiry else '' }}>{{ exp }}</option>
+                    {% else %}
+                    <option>No expiries available</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-auto">
+                <button class="btn btn-outline-secondary btn-sm" type="submit">Refresh ATM Premium</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+{% if expiry_error %}
+<div class="alert alert-danger">{{ expiry_error }}</div>
+{% endif %}
+
+{% if atm_preview %}
+<div class="alert alert-info">
+    Spot <strong>{{ '%.2f'|format(atm_preview.spot) }}</strong> · ATM strike <strong>{{ atm_preview.strike | int }}</strong> ·
+    CE <strong>₹{{ '%.2f'|format(atm_preview.ce_ltp or 0) }}</strong> + PE <strong>₹{{ '%.2f'|format(atm_preview.pe_ltp or 0) }}</strong>
+    {% if atm_preview.combined is not none %}
+    = combined <strong>₹{{ '%.2f'|format(atm_preview.combined) }}</strong> right now.
+    {% endif %}
+    Use this (or the premium you observe at your entry time) as the reference below.
+</div>
+{% endif %}
+
+<div class="card stat-card" style="max-width: 720px;">
+    <div class="card-body">
+        <form method="post" action="{{ url('/strategies/' ~ strategy.id ~ '/configure-straddle') }}" class="row g-3">
+            <input type="hidden" name="user_strategy_id" value="{{ user_strategy_id }}">
+            <input type="hidden" name="underlying" value="{{ selected_underlying }}">
+            <input type="hidden" name="expiry" value="{{ selected_expiry }}">
+
+            <div class="col-12">
+                <div class="small text-body-secondary mb-1">
+                    {{ underlyings[selected_underlying].label }} · ATM straddle · {{ selected_expiry or 'no expiry selected' }}
+                </div>
+            </div>
+
+            <div class="col-12">
+                <label class="form-label">Instance Name</label>
+                <input type="text" name="label" value="{{ existing.label if existing else '' }}" maxlength="120"
+                       class="form-control" placeholder="e.g. NIFTY ATM Straddle — auto-generated if left blank">
+            </div>
+
+            <div class="col-md-4">
+                <label class="form-label">Lots</label>
+                <input type="number" name="lots" min="1" value="{{ params.lots }}" class="form-control">
+            </div>
+            <div class="col-md-4">
+                <label class="form-label">Entry Time</label>
+                <input type="time" name="entry_time" value="{{ params.entry_time }}" class="form-control">
+                <div class="form-text">Combined premium is watched only from this time onward.</div>
+            </div>
+            <div class="col-md-4">
+                <label class="form-label">Close Time</label>
+                <input type="time" name="close_time" value="{{ params.close_time }}" class="form-control">
+                <div class="form-text">Anything still open is force-closed at this time.</div>
+            </div>
+
+            <div class="col-12"><hr></div>
+
+            <div class="col-12">
+                <label class="form-label">Combined CE+PE Reference Premium (₹) <span class="text-danger">*</span></label>
+                <input type="number" step="0.01" min="0.01" name="reference_premium" value="{{ params.reference_premium }}" class="form-control" required>
+                <div class="form-text">
+                    Required — the ATM CE+PE combined premium observed around your entry time (see the box
+                    above). Set this fresh each trading day; entry stays blocked while it's 0.
+                </div>
+            </div>
+
+            <div class="col-md-6">
+                <label class="form-label mb-1">Entry Trigger</label>
+                <div class="form-check mb-1">
+                    <input type="radio" class="form-check-input" id="triggerPct" name="entry_trigger_mode" value="pct"
+                           {{ 'checked' if params.entry_trigger_mode != 'flat' else '' }}>
+                    <label class="form-check-label" for="triggerPct">% rise from reference</label>
+                </div>
+                <div class="input-group mb-2">
+                    <input type="number" step="0.01" name="entry_trigger_pct" value="{{ params.entry_trigger_pct }}" class="form-control">
+                    <span class="input-group-text">%</span>
+                </div>
+                <div class="form-check mb-1">
+                    <input type="radio" class="form-check-input" id="triggerFlat" name="entry_trigger_mode" value="flat"
+                           {{ 'checked' if params.entry_trigger_mode == 'flat' else '' }}>
+                    <label class="form-check-label" for="triggerFlat">Flat points above reference</label>
+                </div>
+                <div class="input-group">
+                    <span class="input-group-text">₹</span>
+                    <input type="number" step="0.01" name="entry_trigger_flat" value="{{ params.entry_trigger_flat }}" class="form-control">
+                </div>
+                <div class="form-text">
+                    Sells the ATM straddle once the live combined premium reaches reference + this amount
+                    (0 = trigger the moment it reaches the reference itself).
+                </div>
+            </div>
+
+            <div class="col-md-6">
+                <label class="form-label">Per-Leg Stop-Loss</label>
+                <div class="input-group mb-2">
+                    <input type="number" step="0.01" name="leg_stop_loss_pct" value="{{ params.leg_stop_loss_pct }}" class="form-control">
+                    <span class="input-group-text">%</span>
+                </div>
+                <div class="form-text mb-3">
+                    Applied independently to each sold leg's own premium. If one leg hits its stop, only
+                    that leg (and its hedge) closes — the other leg stays open with its stop trailed to its
+                    own entry price.
+                </div>
+                <label class="form-label">Combined-Premium Target</label>
+                <div class="input-group">
+                    <input type="number" step="0.01" name="target_pct" value="{{ params.target_pct }}" class="form-control">
+                    <span class="input-group-text">%</span>
+                </div>
+                <div class="form-text">Closes everything still open once the combined premium falls this % from entry.</div>
+            </div>
+
+            <div class="col-12"><hr></div>
+
+            <div class="col-12 form-check">
+                <input type="checkbox" class="form-check-input" id="hedgeEnabled" name="hedge_enabled" value="true"
+                       {{ 'checked' if params.hedge_enabled else '' }}>
+                <label class="form-check-label" for="hedgeEnabled">Buy CE + PE hedges</label>
+            </div>
+            <div class="col-md-6">
+                <label class="form-label">Hedge target premium (₹)</label>
+                <input type="number" step="0.01" name="hedge_premium_target" value="{{ params.hedge_premium_target }}" class="form-control">
+                <div class="form-text">
+                    Buys the CE and PE further OTM whose current premium is each closest to this price (e.g. ₹5 or ₹10).
+                    Each hedge closes automatically alongside its own sold leg.
+                </div>
+            </div>
+
+            <div class="col-12"><hr></div>
+
+            <div class="col-12">
+                <label class="form-label">Mode</label>
+                <select name="mode" class="form-select">
+                    <option value="paper" selected>Paper (simulated)</option>
+                    <option value="live">Live</option>
+                </select>
+            </div>
+
+            <div class="col-12 mt-2">
+                <button id="configureSubmitBtn" class="btn btn-primary w-100" type="submit" {{ 'disabled' if not selected_expiry else '' }}>
+                    {{ 'Update Configuration' if existing else 'Save and Enable' }}
+                </button>
+            </div>
+        </form>
+    </div>
+</div>
+{% endif %}
+{% endblock %}

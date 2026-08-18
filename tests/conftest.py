@@ -21,6 +21,16 @@ from app.db import Base, get_db  # noqa: E402
 get_settings.cache_clear()
 
 
+@pytest.fixture(autouse=True)
+def _no_option_chain_throttle(monkeypatch):
+    # app.dhan.helpers throttles real option_chain calls to 1 per 3s
+    # (Dhan's actual rate limit) via module-level state shared across the
+    # whole process. Tests mock the Dhan client, so there's no real limit to
+    # respect — without this, that global state serializes every test that
+    # touches fetch_chain_df behind a real 3-second sleep.
+    monkeypatch.setattr("app.dhan.helpers._throttle_option_chain", lambda: None)
+
+
 @pytest.fixture()
 def db_session():
     engine = create_engine(

@@ -21,7 +21,14 @@ from datetime import time as dt_time
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from app.dhan.helpers import UNDERLYINGS, fetch_chain_df, fetch_quotes, fetch_spot_price, get_lot_size
+from app.dhan.helpers import (
+    UNDERLYINGS,
+    fetch_chain_df,
+    fetch_quotes,
+    fetch_spot_price,
+    find_strike_by_nearest_premium,
+    get_lot_size,
+)
 from app.strategies.base import OrderLeg, Strategy, StrategyContext
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -42,37 +49,9 @@ def _condition(conditions: dict, key: str) -> dict:
     return {**_DEFAULT_CONDITION, **(conditions or {}).get(key, {})}
 
 
-def _find_strike_by_premium(
-    chain_df, strikes: list[float], start_index: int, option_type: str, price_col: str, sid_col: str,
-    target_premium: float, *, include_start: bool,
-):
-    """Walk strikes outward from `start_index` on the OTM side for
-    `option_type`, returning the (strike, row) whose premium is nearest
-    `target_premium`. Used for both "closest premium" strike selection and
-    hedge-leg selection — the same nearest-premium matching either way."""
-    if option_type == "CE":
-        indices = range(start_index if include_start else start_index + 1, len(strikes))
-    else:
-        indices = range(start_index if include_start else start_index - 1, -1, -1)
-
-    best_row = None
-    best_strike = None
-    best_diff = None
-    for idx in indices:
-        strike = strikes[idx]
-        matches = chain_df[chain_df["strike"] == strike]
-        if matches.empty:
-            continue
-        row = matches.iloc[0]
-        premium = row.get(price_col)
-        if premium is None or not row.get(sid_col):
-            continue
-        diff = abs(float(premium) - target_premium)
-        if best_diff is None or diff < best_diff:
-            best_diff = diff
-            best_row = row
-            best_strike = strike
-    return best_strike, best_row
+# Nearest-live-premium strike walking now lives in app.dhan.helpers as
+# find_strike_by_nearest_premium — shared with atm_straddle_trigger_hedge.py.
+_find_strike_by_premium = find_strike_by_nearest_premium
 
 
 class SingleLegSellerWithHedge(Strategy):

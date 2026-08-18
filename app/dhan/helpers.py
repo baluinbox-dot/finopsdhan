@@ -9,12 +9,38 @@ The DhanHQ SDK wraps HTTP responses as:
 
 from __future__ import annotations
 
+import threading
+import time
 from typing import Any
 
 import pandas as pd
 from dhanhq import dhanhq
 
 _security_master_cache: pd.DataFrame | None = None
+
+# Dhan allows only one option-chain request every 3 seconds, account-wide —
+# far stricter than quote/ticker data, and undocumented in the SDK itself
+# (see .reference/dhanhq-skills/skills/dhanhq/references/option-chain.md).
+# The scheduler evaluates every active UserStrategy in one tick with no
+# spacing between them; the moment a user has two or more active instances
+# that each need a fresh chain (e.g. two strategies, or two instances of the
+# same one), their option_chain calls land back-to-back well under 3s apart
+# and Dhan throttles the second one — surfacing as an ambiguous
+# "remarks: null" error that looks like nothing helpful. Serialize every
+# option_chain call in this process through here, for every user and every
+# strategy, so that never happens regardless of how many are active.
+_option_chain_lock = threading.Lock()
+_option_chain_last_call_at: float = 0.0
+_OPTION_CHAIN_MIN_INTERVAL_SECONDS = 3.0
+
+
+def _throttle_option_chain() -> None:
+    global _option_chain_last_call_at
+    with _option_chain_lock:
+        wait = _OPTION_CHAIN_MIN_INTERVAL_SECONDS - (time.monotonic() - _option_chain_last_call_at)
+        if wait > 0:
+            time.sleep(wait)
+        _option_chain_last_call_at = time.monotonic()
 
 # Index underlyings quick-reference (from the dhanhq-skills SKILL.md).
 # security_id is fixed by Dhan; exchange_segment is always the index segment.
@@ -256,6 +282,7 @@ def fetch_chain_df(
 ) -> tuple[pd.DataFrame, float]:
     """Fetch option-chain data for a given user's client and return a
     normalized DataFrame plus spot price."""
+    _throttle_option_chain()
     response = dhan_client.option_chain(
         under_security_id=under_security_id,
         under_exchange_segment=under_exchange_segment,
@@ -268,6 +295,47 @@ def fetch_chain_df(
 def find_atm_row(chain_df: pd.DataFrame, spot: float) -> pd.Series:
     """Return the nearest strike row to the provided spot value."""
     return chain_df.iloc[(chain_df["strike"] - spot).abs().argsort().iloc[0]]
+
+
+def find_strike_by_nearest_premium(
+    chain_df: pd.DataFrame,
+    strikes: list[float],
+    start_index: int,
+    option_type: str,
+    price_col: str,
+    sid_col: str,
+    target_premium: float,
+    *,
+    include_start: bool,
+) -> tuple[float | None, "pd.Series | None"]:
+    """Walk strikes outward from `start_index` on the OTM side for
+    `option_type`, returning the (strike, row) whose premium is nearest
+    `target_premium`. Shared by every strategy that needs "closest live
+    premium" strike selection — used both to pick a strike by target
+    premium and to pick a hedge leg the same way."""
+    if option_type == "CE":
+        indices = range(start_index if include_start else start_index + 1, len(strikes))
+    else:
+        indices = range(start_index if include_start else start_index - 1, -1, -1)
+
+    best_row = None
+    best_strike = None
+    best_diff = None
+    for idx in indices:
+        strike = strikes[idx]
+        matches = chain_df[chain_df["strike"] == strike]
+        if matches.empty:
+            continue
+        row = matches.iloc[0]
+        premium = row.get(price_col)
+        if premium is None or not row.get(sid_col):
+            continue
+        diff = abs(float(premium) - target_premium)
+        if best_diff is None or diff < best_diff:
+            best_diff = diff
+            best_row = row
+            best_strike = strike
+    return best_strike, best_row
 
 
 def check_margin(
