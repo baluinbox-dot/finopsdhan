@@ -17,3 +17,19 @@ body {
 @media (max-width: 576px) {
     .btn { min-height: 44px; }
 }
+
+/* Auth pages (login/register/forgot-reset password): one centered card
+   instead of a full-width split layout — most of that width went unused
+   on anything but a very wide screen. */
+.auth-wrapper {
+    min-height: calc(100vh - 56px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 2.5rem 1rem;
+}
+
+.auth-card {
+    width: 100%;
+    max-width: 380px;
+}

@@ -49,6 +49,17 @@ class User(Base):
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
     role: Mapped[UserRole] = mapped_column(Enum(UserRole, native_enum=False), default=UserRole.USER, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+    # New accounts must click the link in a verification email before they
+    # can log in. Existing accounts (pre-dating this feature) are backfilled
+    # to True by the migration so nobody already registered gets locked out.
+    email_verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    email_verification_token: Mapped[str | None] = mapped_column(String(64), unique=True, index=True, nullable=True)
+    email_verification_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    password_reset_token: Mapped[str | None] = mapped_column(String(64), unique=True, index=True, nullable=True)
+    password_reset_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now, nullable=False)
 
