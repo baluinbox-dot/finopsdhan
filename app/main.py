@@ -38,7 +38,7 @@ app.add_middleware(
     # under a different path prefix.
     session_cookie="finopsdhan_session",
     same_site="lax",
-    https_only=settings.is_production,
+    https_only=settings.session_cookie_https_only,
 )
 
 static_dir = Path(__file__).parent / "static"
