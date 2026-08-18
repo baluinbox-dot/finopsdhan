@@ -52,10 +52,10 @@
 
 {% if atm_preview %}
 <div class="alert alert-info">
-    Spot <strong>{{ '%.2f'|format(atm_preview.spot) }}</strong> — at a 50pt gap, the initial window would be
+    Spot <strong>{{ '%.2f'|format(atm_preview.spot) }}</strong> — at a {{ atm_preview.gap | int }}pt gap, the initial window would be
     T <strong>{{ atm_preview.top | int }}</strong>, M (ATM) <strong>{{ atm_preview.middle | int }}</strong>,
-    B <strong>{{ atm_preview.bottom | int }}</strong>. Set the actual strike gap below (e.g. 100 for BANKNIFTY/SENSEX) —
-    this preview always shows 50pt spacing regardless.
+    B <strong>{{ atm_preview.bottom | int }}</strong>. This uses the Strike Gap value below — change it and refresh
+    to see the window at a different spacing.
 </div>
 {% endif %}
 

@@ -524,6 +524,23 @@ def configure_rolling_form(
 
     has_dhan = current_user.dhan_credential is not None and current_user.dhan_credential.is_active
 
+    try:
+        strategy_cls = get_strategy_class(strategy.code_ref)
+        class_defaults = strategy_cls.default_params
+    except ValueError:
+        class_defaults = {}
+    params = {**class_defaults, **strategy.default_params, **existing_params}
+    params["underlying"] = underlying
+    if "strike_gap" not in existing_params:
+        # NIFTY/FINNIFTY trade in 50-point strikes, BANKNIFTY/SENSEX in
+        # 100 — defaulting everyone to 50 meant a fresh BANKNIFTY/SENSEX
+        # instance silently searched for a strike that doesn't exist (e.g.
+        # ATM+50 with only 100-point strikes available lands exactly
+        # between two real strikes), producing a nonsensical T==M preview.
+        # Only overridden for a brand-new instance — an existing saved gap
+        # is always respected as-is.
+        params["strike_gap"] = 100 if underlying in ("BANKNIFTY", "SENSEX") else 50
+
     expiries: list[str] = []
     expiry_error: str | None = None
     atm_preview: dict | None = None
@@ -553,20 +570,12 @@ def configure_rolling_form(
                 if not chain_df.empty:
                     strikes = sorted(chain_df["strike"].tolist())
                     atm_strike = min(strikes, key=lambda x: abs(x - spot))
-                    gap = 50  # preview only, before the user's own strike_gap input is known
+                    gap = float(params["strike_gap"] or 50)  # same gap the form will actually use, not a hardcoded guess
                     top = min(strikes, key=lambda x: abs(x - (atm_strike + gap)))
                     bottom = min(strikes, key=lambda x: abs(x - (atm_strike - gap)))
-                    atm_preview = {"spot": spot, "top": top, "middle": atm_strike, "bottom": bottom}
+                    atm_preview = {"spot": spot, "top": top, "middle": atm_strike, "bottom": bottom, "gap": gap}
             except Exception as exc:  # noqa: BLE001 — preview is a nice-to-have, never block the form
                 expiry_error = expiry_error or f"Could not fetch live strikes: {exc}"
-
-    try:
-        strategy_cls = get_strategy_class(strategy.code_ref)
-        class_defaults = strategy_cls.default_params
-    except ValueError:
-        class_defaults = {}
-    params = {**class_defaults, **strategy.default_params, **existing_params}
-    params["underlying"] = underlying
 
     return render(
         request,
