@@ -29,9 +29,26 @@ class Settings(BaseSettings):
     # have a trailing slash.
     base_path: str = ""
 
+    # None (default) ties the session cookie's Secure flag to `is_production`
+    # — right for a normal deploy that terminates real TLS. Explicitly set
+    # SESSION_COOKIE_SECURE=false to override that when a production
+    # deployment is (temporarily or otherwise) served over plain HTTP behind
+    # a reverse proxy with no certificate — a Secure cookie is silently
+    # dropped by every browser on a non-HTTPS connection, which breaks login
+    # entirely (looks like "successfully registered" then immediately
+    # "not logged in" on the very next request) with no error surfaced
+    # anywhere. Set back to true (or unset) once real TLS is in front of it.
+    session_cookie_secure: bool | None = None
+
     @property
     def is_production(self) -> bool:
         return self.env.lower() == "production"
+
+    @property
+    def session_cookie_https_only(self) -> bool:
+        if self.session_cookie_secure is not None:
+            return self.session_cookie_secure
+        return self.is_production
 
 
 @lru_cache
