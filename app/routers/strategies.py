@@ -14,7 +14,7 @@ from sqlalchemy import select
 from app.dhan.client import DhanNotConnectedError, get_user_dhan_client
 from app.dhan.helpers import UNDERLYINGS, fetch_chain_df, get_lot_size, list_expiries
 from app.deps import CurrentUser, DbSession, SuperadminUser
-from app.engine.runner import close_user_strategy_now, find_open_run
+from app.engine.runner import close_user_strategy_now, enter_user_strategy_now, find_open_run
 from app.models import Strategy, StrategyMode, UserStrategy
 from app.strategies.registry import RICH_CONFIG_STRATEGIES, STRATEGY_REGISTRY, get_strategy_class
 from app.templating import flash, render, url
@@ -442,6 +442,37 @@ def close_now(request: Request, db: DbSession, current_user: CurrentUser, user_s
         flash(request, "Position closed — all legs, including any hedge, have been reversed.", "success")
     else:
         flash(request, "No open position to close.", "info")
+    return RedirectResponse(url("/dashboard"), status_code=303)
+
+
+@router.post("/{user_strategy_id}/enter-now")
+def enter_now(request: Request, db: DbSession, current_user: CurrentUser, user_strategy_id: uuid.UUID):
+    """Manually trigger an entry attempt right now — the one deliberate
+    way to trade again today after a close (automatic or manual) has
+    otherwise stopped the scheduler from re-entering this instance on its
+    own for the rest of the day. Still requires the strategy's real entry
+    conditions to actually be met; this doesn't force a trade blindly."""
+    user_strategy = db.get(UserStrategy, user_strategy_id)
+    if user_strategy is None or user_strategy.user_id != current_user.id:
+        flash(request, "Strategy instance not found.", "error")
+        return RedirectResponse(url("/dashboard"), status_code=303)
+
+    try:
+        entered = enter_user_strategy_now(db, user_strategy)
+    except DhanNotConnectedError as exc:
+        flash(request, str(exc), "error")
+        return RedirectResponse(url("/dashboard"), status_code=303)
+    except ValueError as exc:
+        flash(request, str(exc), "error")
+        return RedirectResponse(url("/dashboard"), status_code=303)
+    except Exception as exc:  # noqa: BLE001
+        flash(request, f"Could not enter a position: {exc}", "error")
+        return RedirectResponse(url("/dashboard"), status_code=303)
+
+    if entered:
+        flash(request, "Entry conditions were met — position opened.", "success")
+    else:
+        flash(request, "Entry conditions aren't met right now — nothing was entered. Try again later.", "info")
     return RedirectResponse(url("/dashboard"), status_code=303)
 
 
