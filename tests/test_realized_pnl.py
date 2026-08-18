@@ -1,6 +1,6 @@
 """Realized P&L is computed and saved the moment a position closes —
-nothing was persisted before this. Covers app.engine.runner._leg_realized_pnl
-and its wiring into _close_open_run (both the scheduled-exit and manual
+nothing was persisted before this. Covers app.strategies.base.leg_pnl and
+its wiring into _close_open_run (both the scheduled-exit and manual
 Close Now paths, which share it)."""
 
 from __future__ import annotations
@@ -8,8 +8,9 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from unittest.mock import MagicMock
 
-from app.engine.runner import _close_open_run, _leg_realized_pnl, close_user_strategy_now
+from app.engine.runner import _close_open_run, close_user_strategy_now
 from app.models import Strategy, StrategyMode, StrategyRun, User, UserRole, UserStrategy
+from app.strategies.base import leg_pnl
 
 
 def _sell_leg(price: float, quantity: int = 75) -> dict:
@@ -29,19 +30,19 @@ def _buy_leg(price: float, quantity: int = 75) -> dict:
 
 
 def test_leg_pnl_sell_profits_when_bought_back_cheaper():
-    assert _leg_realized_pnl(_sell_leg(50.0), exit_price=30.0) == (50.0 - 30.0) * 75
+    assert leg_pnl(_sell_leg(50.0), 30.0) == (50.0 - 30.0) * 75
 
 
 def test_leg_pnl_sell_loses_when_bought_back_dearer():
-    assert _leg_realized_pnl(_sell_leg(50.0), exit_price=70.0) == (50.0 - 70.0) * 75
+    assert leg_pnl(_sell_leg(50.0), 70.0) == (50.0 - 70.0) * 75
 
 
 def test_leg_pnl_buy_profits_when_sold_dearer():
-    assert _leg_realized_pnl(_buy_leg(10.0), exit_price=15.0) == (15.0 - 10.0) * 75
+    assert leg_pnl(_buy_leg(10.0), 15.0) == (15.0 - 10.0) * 75
 
 
 def test_leg_pnl_buy_loses_when_sold_cheaper():
-    assert _leg_realized_pnl(_buy_leg(10.0), exit_price=4.0) == (4.0 - 10.0) * 75
+    assert leg_pnl(_buy_leg(10.0), 4.0) == (4.0 - 10.0) * 75
 
 
 def _make_open_run(db_session, *, sell_price=50.0, buy_price=None) -> StrategyRun:

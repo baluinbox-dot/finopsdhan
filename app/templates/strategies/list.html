@@ -16,6 +16,7 @@
 <div class="row g-3">
     {% for s in strategies %}
     {% set instances = my_instances.get(s.id, []) %}
+    {% set configure_action = 'configure-rolling' if s.code_ref == 'three_pair_rolling' else 'configure' %}
     <div class="col-12 col-md-6 col-xl-4">
         <div class="card stat-card h-100">
             <div class="card-body d-flex flex-column">
@@ -42,7 +43,7 @@
                                 </div>
                             </div>
                             <div class="mt-2">
-                                <a href="{{ url('/strategies/' ~ s.id ~ '/configure') }}?user_strategy_id={{ inst.id }}" class="btn btn-outline-secondary btn-sm w-100 mb-1">Reconfigure</a>
+                                <a href="{{ url('/strategies/' ~ s.id ~ '/' ~ configure_action) }}?user_strategy_id={{ inst.id }}" class="btn btn-outline-secondary btn-sm w-100 mb-1">Reconfigure</a>
                                 <div class="d-flex gap-2">
                                     {% if inst.is_active %}
                                     <form method="post" action="{{ url('/strategies/instance/' ~ inst.id ~ '/disable') }}" class="flex-grow-1">
@@ -63,7 +64,7 @@
                         {% endfor %}
                     </div>
                     {% endif %}
-                    <a href="{{ url('/strategies/' ~ s.id ~ '/configure') }}" class="btn btn-primary btn-sm w-100 {{ 'disabled' if not has_dhan else '' }}">
+                    <a href="{{ url('/strategies/' ~ s.id ~ '/' ~ configure_action) }}" class="btn btn-primary btn-sm w-100 {{ 'disabled' if not has_dhan else '' }}">
                         {{ '+ Add Another Instance' if instances else 'Configure →' }}
                     </a>
                 {% else %}

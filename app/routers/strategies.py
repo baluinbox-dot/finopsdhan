@@ -490,6 +490,205 @@ def disable_strategy(request: Request, db: DbSession, current_user: CurrentUser,
     return RedirectResponse(url("/strategies"), status_code=303)
 
 
+@router.get("/{strategy_id}/configure-rolling")
+def configure_rolling_form(
+    request: Request,
+    db: DbSession,
+    current_user: CurrentUser,
+    strategy_id: uuid.UUID,
+    user_strategy_id: str = "",
+    underlying: str = "",
+    expiry: str = "",
+):
+    strategy = db.get(Strategy, strategy_id)
+    if strategy is None or not strategy.is_published:
+        flash(request, "Strategy not found.", "error")
+        return RedirectResponse(url("/strategies"), status_code=303)
+
+    existing: UserStrategy | None = None
+    if user_strategy_id:
+        try:
+            existing = db.get(UserStrategy, uuid.UUID(user_strategy_id))
+        except ValueError:
+            existing = None
+        if existing is None or existing.user_id != current_user.id or existing.strategy_id != strategy_id:
+            flash(request, "Strategy instance not found.", "error")
+            return RedirectResponse(url("/strategies"), status_code=303)
+
+    existing_params = existing.params if existing else {}
+    underlying = (underlying or existing_params.get("underlying") or "NIFTY").upper()
+    if underlying not in UNDERLYINGS:
+        underlying = "NIFTY"
+    if not expiry:
+        expiry = existing_params.get("expiry") or ""
+
+    has_dhan = current_user.dhan_credential is not None and current_user.dhan_credential.is_active
+
+    expiries: list[str] = []
+    expiry_error: str | None = None
+    atm_preview: dict | None = None
+    selected_expiry = expiry
+
+    if has_dhan:
+        try:
+            user_dhan = get_user_dhan_client(db, current_user)
+            expiries = list_expiries(user_dhan.client, underlying)
+        except DhanNotConnectedError as exc:
+            expiry_error = str(exc)
+        except Exception as exc:  # noqa: BLE001
+            expiry_error = f"Could not fetch expiries from Dhan: {exc}"
+
+        if not selected_expiry and expiries:
+            selected_expiry = expiries[0]
+
+        if selected_expiry and selected_expiry in expiries:
+            try:
+                meta = UNDERLYINGS[underlying]
+                chain_df, spot = fetch_chain_df(
+                    user_dhan.client,
+                    under_security_id=meta["security_id"],
+                    expiry=selected_expiry,
+                    under_exchange_segment=meta["exchange_segment"],
+                )
+                if not chain_df.empty:
+                    strikes = sorted(chain_df["strike"].tolist())
+                    atm_strike = min(strikes, key=lambda x: abs(x - spot))
+                    gap = 50  # preview only, before the user's own strike_gap input is known
+                    fin1 = min(strikes, key=lambda x: abs(x - (atm_strike + gap)))
+                    fin3 = min(strikes, key=lambda x: abs(x - (atm_strike - gap)))
+                    atm_preview = {"spot": spot, "fin1": fin1, "fin2": atm_strike, "fin3": fin3}
+            except Exception as exc:  # noqa: BLE001 — preview is a nice-to-have, never block the form
+                expiry_error = expiry_error or f"Could not fetch live strikes: {exc}"
+
+    try:
+        strategy_cls = get_strategy_class(strategy.code_ref)
+        class_defaults = strategy_cls.default_params
+    except ValueError:
+        class_defaults = {}
+    params = {**class_defaults, **strategy.default_params, **existing_params}
+    params["underlying"] = underlying
+
+    return render(
+        request,
+        "strategies/configure_rolling.html",
+        {
+            "current_user": current_user,
+            "user_strategy_id": user_strategy_id,
+            "strategy": strategy,
+            "has_dhan": has_dhan,
+            "underlyings": UNDERLYINGS,
+            "selected_underlying": underlying,
+            "selected_expiry": selected_expiry,
+            "expiries": expiries,
+            "expiry_error": expiry_error,
+            "atm_preview": atm_preview,
+            "params": params,
+            "existing": existing,
+        },
+    )
+
+
+@router.post("/{strategy_id}/configure-rolling")
+def configure_rolling_submit(
+    request: Request,
+    db: DbSession,
+    current_user: CurrentUser,
+    strategy_id: uuid.UUID,
+    user_strategy_id: str = Form(""),
+    label: str = Form(""),
+    underlying: str = Form(...),
+    expiry: str = Form(...),
+    lots: int = Form(1),
+    start_time: str = Form("09:20"),
+    end_time: str = Form("14:45"),
+    strike_gap: float = Form(50),
+    daily_stop_loss: float = Form(10000),
+    daily_target: float = Form(15000),
+    mode: str = Form("paper"),
+):
+    strategy = db.get(Strategy, strategy_id)
+    if strategy is None or not strategy.is_published:
+        flash(request, "Strategy not found.", "error")
+        return RedirectResponse(url("/strategies"), status_code=303)
+
+    if not current_user.dhan_credential or not current_user.dhan_credential.is_active:
+        flash(request, "Connect your Dhan account on the Settings page before enabling a strategy.", "error")
+        return RedirectResponse(url("/strategies"), status_code=303)
+
+    if underlying.upper() not in UNDERLYINGS:
+        flash(request, "Unknown underlying.", "error")
+        return RedirectResponse(url(f"/strategies/{strategy_id}/configure-rolling"), status_code=303)
+
+    if not expiry:
+        flash(request, "Pick an expiry before saving.", "error")
+        redirect_url = f"/strategies/{strategy_id}/configure-rolling?underlying={underlying}"
+        if user_strategy_id:
+            redirect_url += f"&user_strategy_id={user_strategy_id}"
+        return RedirectResponse(url(redirect_url), status_code=303)
+
+    if strike_gap <= 0:
+        flash(request, "Strike gap must be greater than zero.", "error")
+        redirect_url = f"/strategies/{strategy_id}/configure-rolling?underlying={underlying}&expiry={expiry}"
+        if user_strategy_id:
+            redirect_url += f"&user_strategy_id={user_strategy_id}"
+        return RedirectResponse(url(redirect_url), status_code=303)
+
+    requested_mode = StrategyMode.LIVE if mode == "live" else StrategyMode.PAPER
+    if requested_mode == StrategyMode.LIVE:
+        flash(
+            request,
+            "Live trading isn't enabled from this screen yet — the strategy has been "
+            "turned on in paper mode instead. Live mode requires a separate explicit "
+            "confirmation step.",
+            "warning",
+        )
+        requested_mode = StrategyMode.PAPER
+
+    params = {
+        "underlying": underlying.upper(),
+        "expiry": expiry,
+        "lots": lots,
+        "start_time": start_time,
+        "end_time": end_time,
+        "strike_gap": strike_gap,
+        "daily_stop_loss": daily_stop_loss,
+        "daily_target": daily_target,
+    }
+
+    existing: UserStrategy | None = None
+    if user_strategy_id:
+        try:
+            existing = db.get(UserStrategy, uuid.UUID(user_strategy_id))
+        except ValueError:
+            existing = None
+        if existing is None or existing.user_id != current_user.id or existing.strategy_id != strategy_id:
+            flash(request, "Strategy instance not found.", "error")
+            return RedirectResponse(url("/strategies"), status_code=303)
+
+    final_label = label.strip() or f"3-Pair Rolling {params['underlying']}"
+
+    if existing:
+        existing.label = final_label
+        existing.params = params
+        existing.mode = requested_mode
+        existing.is_active = True
+    else:
+        db.add(
+            UserStrategy(
+                user_id=current_user.id,
+                strategy_id=strategy_id,
+                label=final_label,
+                params=params,
+                mode=requested_mode,
+                is_active=True,
+            )
+        )
+    db.commit()
+
+    flash(request, f"{final_label} configured and enabled in {requested_mode.value} mode.", "success")
+    return RedirectResponse(url("/strategies"), status_code=303)
+
+
 # --- Superadmin: publish/manage strategy definitions ---
 
 
