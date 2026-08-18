@@ -153,12 +153,18 @@ class StrategyRun(Base):
     evaluation_notes: Mapped[str] = mapped_column(Text, default="", nullable=False)
 
     # True only when this run was ended via the "Close Now" button, not an
-    # automatic exit (stop-loss/target/window-end/per-leg rule). A
-    # strategy's one-entry-per-day cap (app.engine.runner._today_run_count)
-    # excludes manually-closed runs — a deliberate manual intervention
-    # shouldn't burn the day's one shot the way the strategy's own exit
-    # signal does.
+    # automatic exit (stop-loss/target/window-end/per-leg rule). Purely
+    # informational (e.g. for a trade-history view) — it does NOT affect
+    # the one-entry-per-day cap; see app.engine.runner._today_run_count.
     manually_closed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
+    # Realized P&L in rupees, accumulated incrementally as legs close (a
+    # strategy with independent per-leg exits may close this run across
+    # more than one pass) — see app.engine.runner._leg_realized_pnl. Final
+    # and correct once status == "closed". closed_at is set the moment
+    # that happens, for date-wise reporting.
+    realized_pnl: Mapped[float] = mapped_column(Numeric(14, 2), default=0, nullable=False)
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     user_strategy: Mapped["UserStrategy"] = relationship(back_populates="runs")
     orders: Mapped[list["Order"]] = relationship(back_populates="strategy_run", cascade="all, delete-orphan")

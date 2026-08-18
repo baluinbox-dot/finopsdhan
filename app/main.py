@@ -13,7 +13,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from app.config import get_settings
 from app.deps import CurrentUserOptional
 from app.engine.scheduler import start_scheduler, stop_scheduler
-from app.routers import auth, dashboard, settings as settings_router, strategies
+from app.routers import auth, dashboard, reports, settings as settings_router, strategies
 from app.seed import seed_demo_strategy
 from app.templating import url
 
@@ -51,6 +51,7 @@ app.include_router(auth.router, prefix=settings.base_path)
 app.include_router(settings_router.router, prefix=settings.base_path)
 app.include_router(strategies.router, prefix=settings.base_path)
 app.include_router(dashboard.router, prefix=settings.base_path)
+app.include_router(reports.router, prefix=settings.base_path)
 
 
 @app.get(url("/"))
