@@ -124,6 +124,74 @@ def test_entry_requires_expiry():
         assert strategy.evaluate_entry(ctx) is None
 
 
+# --- entry: hedge ---
+
+
+def test_entry_with_hedge_adds_one_ce_and_one_pe_sized_for_all_three_pairs():
+    dhan = _mock_dhan_client(spot=24400.0)
+    ctx = StrategyContext(
+        dhan_client=dhan,
+        params={"expiry": "2026-08-27", "strike_gap": 50, "lots": 1, "hedge_enabled": True, "hedge_premium_target": 5},
+        today_run_count=0,
+    )
+    strategy = ThreePairRollingStrategy()
+
+    with patch("app.strategies.three_pair_rolling._now_ist", return_value=_within_window_time()):
+        legs = strategy.evaluate_entry(ctx)
+
+    assert legs is not None
+    assert len(legs) == 8  # 3 pairs x (CE+PE) + 1 CE hedge + 1 PE hedge
+
+    primary = [leg for leg in legs if leg.role == "primary"]
+    hedges = [leg for leg in legs if leg.role == "hedge"]
+    assert len(primary) == 6
+    assert len(hedges) == 2
+    assert {leg.transaction_type for leg in hedges} == {"BUY"}
+    assert {leg.trading_symbol.split()[2] for leg in hedges} == {"CE", "PE"}
+
+    # 1 lot per pair x 3 pairs = 3x a single pair's lot size on each hedge side.
+    for leg in hedges:
+        assert leg.quantity == 75 * 1 * 3
+    for leg in primary:
+        assert leg.quantity == 75 * 1
+
+
+def test_entry_with_hedge_scales_3x_with_lots_per_pair():
+    dhan = _mock_dhan_client(spot=24400.0)
+    ctx = StrategyContext(
+        dhan_client=dhan,
+        params={"expiry": "2026-08-27", "strike_gap": 50, "lots": 2, "hedge_enabled": True, "hedge_premium_target": 5},
+        today_run_count=0,
+    )
+    strategy = ThreePairRollingStrategy()
+
+    with patch("app.strategies.three_pair_rolling._now_ist", return_value=_within_window_time()):
+        legs = strategy.evaluate_entry(ctx)
+
+    assert legs is not None
+    hedges = [leg for leg in legs if leg.role == "hedge"]
+    primary = [leg for leg in legs if leg.role == "primary"]
+    for leg in hedges:
+        assert leg.quantity == 75 * 2 * 3  # 2 lots/pair x 3 pairs = 6 lots each side
+    for leg in primary:
+        assert leg.quantity == 75 * 2
+
+
+def test_entry_hedge_disabled_by_default_adds_no_hedge_legs():
+    dhan = _mock_dhan_client(spot=24400.0)
+    ctx = StrategyContext(
+        dhan_client=dhan, params={"expiry": "2026-08-27", "strike_gap": 50, "lots": 1}, today_run_count=0,
+    )
+    strategy = ThreePairRollingStrategy()
+
+    with patch("app.strategies.three_pair_rolling._now_ist", return_value=_within_window_time()):
+        legs = strategy.evaluate_entry(ctx)
+
+    assert legs is not None
+    assert len(legs) == 6
+    assert all(leg.role == "primary" for leg in legs)
+
+
 # --- helpers for exit/roll tests ---
 
 
@@ -138,8 +206,21 @@ def _strike_legs(strike: int, role: str = "T", ce_price: float = 60.0, pe_price:
     ]
 
 
-def _window_notes(b: int = 24350, m: int = 24400, t: int = 24450, **overrides) -> dict:
+def _hedge_legs(ce_strike: int = 24200, pe_strike: int = 24600, quantity: int = 225) -> list[dict]:
+    return [
+        {"label": f"HEDGE BUY {ce_strike} CE", "security_id": _ce_id(ce_strike), "trading_symbol": f"NIFTY {ce_strike} CE 2026-08-27",
+         "exchange_segment": "NSE_FNO", "transaction_type": "BUY", "quantity": quantity, "order_type": "LIMIT",
+         "product_type": "INTRADAY", "price": 5.0, "role": "hedge"},
+        {"label": f"HEDGE BUY {pe_strike} PE", "security_id": _pe_id(pe_strike), "trading_symbol": f"NIFTY {pe_strike} PE 2026-08-27",
+         "exchange_segment": "NSE_FNO", "transaction_type": "BUY", "quantity": quantity, "order_type": "LIMIT",
+         "product_type": "INTRADAY", "price": 5.0, "role": "hedge"},
+    ]
+
+
+def _window_notes(b: int = 24350, m: int = 24400, t: int = 24450, hedge: bool = False, **overrides) -> dict:
     legs = _strike_legs(b, "B") + _strike_legs(m, "M") + _strike_legs(t, "T")
+    if hedge:
+        legs += _hedge_legs()
     notes = {"legs": legs, "entry_premium": 0}
     notes.update(overrides)
     return notes
@@ -178,6 +259,51 @@ def test_upward_shift_closes_bottom_opens_new_top():
     assert set(roll["close_security_ids"]) == {_ce_id(24350), _pe_id(24350)}  # old B closed
     new_strikes = {int(leg.trading_symbol.split()[1]) for leg in roll["new_legs"]}
     assert new_strikes == {24500}  # new T = old T + gap
+
+
+def test_downward_shift_never_touches_hedge_legs():
+    """The hedge is bought once at entry and never rolls with T/M/B --
+    a shift must only ever name primary-role legs in close_security_ids
+    or new_legs, regardless of where the hedge strikes happen to sit."""
+    strategy = ThreePairRollingStrategy()
+    dhan = _mock_dhan_client(spot=24350.0)
+    ctx = StrategyContext(dhan_client=dhan, params={"expiry": "2026-08-27", "strike_gap": 50})
+
+    decision = strategy.evaluate_rolls(ctx, _window_notes(hedge=True))
+
+    assert decision is not None
+    roll = decision["rolls"][0]
+    hedge_sids = {leg["security_id"] for leg in _hedge_legs()}
+    assert not (set(roll["close_security_ids"]) & hedge_sids)
+    assert all(leg.role == "primary" for leg in roll["new_legs"])
+
+
+def test_roll_still_works_when_a_hedge_strike_collides_with_a_window_strike():
+    """A hedge CE/PE strike landing on the exact same strike as one of the
+    open T/M/B legs must not get swept into that strike's group -- the
+    window must still be read as exactly 3 primary strikes."""
+    strategy = ThreePairRollingStrategy()
+    dhan = _mock_dhan_client(spot=24350.0)
+    ctx = StrategyContext(dhan_client=dhan, params={"expiry": "2026-08-27", "strike_gap": 50})
+
+    # Hedge CE strike deliberately collides with the open Top (24450).
+    legs = _strike_legs(24350, "B") + _strike_legs(24400, "M") + _strike_legs(24450, "T") + _hedge_legs(ce_strike=24450)
+    notes = {"legs": legs, "entry_premium": 0}
+
+    decision = strategy.evaluate_rolls(ctx, notes)
+
+    assert decision is not None
+    assert len(decision["rolls"]) == 1
+    roll = decision["rolls"][0]
+    # Exactly the primary T pair, nothing more -- the hedge's security_id
+    # happens to equal the primary CE's here (same real contract), so this
+    # checks list length too, not just set membership, to catch the hedge
+    # sneaking in as a spurious 3rd close_security_id.
+    assert len(roll["close_security_ids"]) == 2
+    assert set(roll["close_security_ids"]) == {_ce_id(24450), _pe_id(24450)}
+    # New legs sized off the primary's own quantity (75), not accidentally
+    # off the hedge's 225 -- would only happen if the hedge leaked in.
+    assert {leg.quantity for leg in roll["new_legs"]} == {75}
 
 
 def test_no_shift_when_spot_inside_window():
