@@ -286,15 +286,29 @@ def _apply_rolls(
                 securities_by_segment.setdefault(leg["exchange_segment"], []).append(int(leg["security_id"]))
             quotes = fetch_quotes(dhan_client, securities_by_segment)
 
+            # Never close a leg on a fabricated price. Falling back to the
+            # stored entry price here (as this used to do) produces a fake
+            # "flat" fill indistinguishable from a real one — silently
+            # wrong P&L, not an error anyone would notice. If any leg in
+            # this roll can't get a fresh quote this pass, skip the whole
+            # roll (don't close some legs and not others, and don't open
+            # the replacement pair either) and retry next poll — the same
+            # "don't guess" contract evaluate_rolls already uses when it
+            # can't fetch chain/spot data.
+            missing = [
+                leg for leg in to_close
+                if (leg["exchange_segment"], str(leg["security_id"])) not in quotes
+            ]
+            if missing:
+                logger.warning(
+                    "Skipping roll — could not fetch a fresh exit quote for %s; will retry next poll.",
+                    [leg["security_id"] for leg in missing],
+                )
+                continue
+
             for leg_data in to_close:
-                quote = quotes.get((leg_data["exchange_segment"], str(leg_data["security_id"])))
-                if quote is not None:
-                    exit_price = float(quote.get("last_price", leg_data["price"]))
-                else:
-                    exit_price = leg_data["price"]
-                    logger.warning(
-                        "Could not fetch fresh exit quote for %s during roll; using last known price.", leg_data["security_id"]
-                    )
+                quote = quotes[(leg_data["exchange_segment"], str(leg_data["security_id"]))]
+                exit_price = float(quote.get("last_price", leg_data["price"]))
 
                 exit_leg = OrderLeg(
                     label=f"ROLL-CLOSE {leg_data['label']}",

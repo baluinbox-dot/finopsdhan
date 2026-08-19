@@ -114,6 +114,36 @@ def test_apply_rolls_closes_old_pair_and_opens_new_one(db_session):
     assert entry_orders[_ce_id(24300)].price == 90.0
 
 
+def test_apply_rolls_skips_roll_when_a_fresh_exit_quote_is_unavailable(db_session):
+    """A quote fetch that fails (Dhan throttled/errored, or the security is
+    simply missing from the response) must never fall back to the stale
+    entry price — that fakes a flat/no-op fill instead of a real market
+    price. The roll should be skipped entirely (nothing closed, nothing
+    new opened) so it can retry with a fresh quote next poll."""
+    run = _make_open_run(db_session)
+    dhan = MagicMock()
+    # Quote for the CE leg is present, but the PE leg is absent from the
+    # response — a partial failure, not a clean success or a clean error.
+    dhan.quote_data.return_value = {
+        "status": "success",
+        "data": {"status": "success", "data": {"NSE_FNO": {_ce_id(24450): {"last_price": 40.0}}}},
+    }
+
+    new_legs = _roll_leg("FIN1", 24300, 90.0)
+    decision = {"rolls": [{"close_security_ids": [_ce_id(24450), _pe_id(24450)], "new_legs": new_legs}]}
+
+    _apply_rolls(db_session, dhan, run.user_strategy.user_id, run, decision, is_live=False)
+
+    db_session.refresh(run)
+    assert run.legs_planned.get("leg_state") is None  # nothing touched at all
+    all_security_ids = {leg["security_id"] for leg in run.legs_planned["legs"]}
+    assert _ce_id(24300) not in all_security_ids  # new pair was never opened either
+    assert float(run.realized_pnl or 0) == 0.0
+
+    orders = db_session.query(Order).filter(Order.strategy_run_id == run.id).all()
+    assert orders == []  # no exit and no entry orders placed
+
+
 def test_apply_rolls_ignores_a_roll_with_nothing_currently_open_to_close(db_session):
     """A roll decision naming legs that are already closed (e.g. a stale
     decision computed just before a faster-firing daily SL closed
