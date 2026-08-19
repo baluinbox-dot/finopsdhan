@@ -9,12 +9,15 @@ The DhanHQ SDK wraps HTTP responses as:
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from typing import Any, Callable
 
 import pandas as pd
 from dhanhq import dhanhq
+
+logger = logging.getLogger("app.dhan")
 
 _security_master_cache: pd.DataFrame | None = None
 
@@ -136,12 +139,15 @@ def fetch_quotes(dhan_client: "dhanhq", securities: dict[str, list[Any]]) -> dic
     """
     try:
         response = _call_with_retry(lambda: dhan_client.quote_data(securities))
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("quote_data call raised for %s: %s: %s", securities, type(exc).__name__, exc)
         return {}
     if response.get("status") != "success":
+        logger.warning("quote_data call failed for %s: %s", securities, response.get("remarks") or response)
         return {}
     data = _unwrap_nested(response.get("data"))
     if not isinstance(data, dict):
+        logger.warning("quote_data returned an unexpected shape for %s: %r", securities, response.get("data"))
         return {}
 
     result: dict[tuple[str, str], dict[str, Any]] = {}
@@ -150,6 +156,17 @@ def fetch_quotes(dhan_client: "dhanhq", securities: dict[str, list[Any]]) -> dic
             continue
         for sid, quote in sid_map.items():
             result[(segment, str(sid))] = quote
+
+    # Individually-missing securities (present in the request, absent from
+    # the response) are common and expected — not every symbol trades
+    # every tick — so this stays at debug, not a warning like the failures
+    # above.
+    requested = {str(sid) for sids in securities.values() for sid in sids}
+    returned = {sid for _, sid in result.keys()}
+    missing = requested - returned
+    if missing:
+        logger.debug("quote_data response omitted %s (requested %s)", missing, requested)
+
     return result
 
 
