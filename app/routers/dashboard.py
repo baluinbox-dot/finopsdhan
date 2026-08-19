@@ -61,17 +61,31 @@ def _leg_pnl(entry: Order, exit_: Order) -> float:
     return (float(exit_.price) - float(entry.price)) * entry.quantity
 
 
+def _paginate(items: list, page: int, per_page: int) -> tuple[list, int, int, int]:
+    if per_page not in ORDERS_PER_PAGE_CHOICES:
+        per_page = ORDERS_PER_PAGE_DEFAULT
+    total = len(items)
+    total_pages = max(1, -(-total // per_page))  # ceil division
+    page = max(1, min(page, total_pages))
+    paged = items[(page - 1) * per_page : (page - 1) * per_page + per_page]
+    return paged, page, per_page, total_pages
+
+
 @router.get("")
-def dashboard(request: Request, db: DbSession, current_user: CurrentUser, page: int = 1, per_page: int = ORDERS_PER_PAGE_DEFAULT):
+def dashboard(
+    request: Request,
+    db: DbSession,
+    current_user: CurrentUser,
+    page: int = 1,
+    per_page: int = ORDERS_PER_PAGE_DEFAULT,
+    running_page: int = 1,
+    running_per_page: int = ORDERS_PER_PAGE_DEFAULT,
+):
     user_strategies = db.scalars(
         select(UserStrategy).where(UserStrategy.user_id == current_user.id)
     ).all()
     active_count = sum(1 for us in user_strategies if us.is_active)
     open_run_ids = {us.id for us in user_strategies if find_open_run(us) is not None}
-
-    if per_page not in ORDERS_PER_PAGE_CHOICES:
-        per_page = ORDERS_PER_PAGE_DEFAULT
-    page = max(1, page)
 
     # Pairing needs every order (an entry can be arbitrarily far behind its
     # exit), so this loads the user's full order history rather than one
@@ -82,26 +96,26 @@ def dashboard(request: Request, db: DbSession, current_user: CurrentUser, page: 
     ).all()
     running_orders, closed_pairs = _pair_orders(all_orders)
 
-    total_closed = len(closed_pairs)
-    total_pages = max(1, -(-total_closed // per_page))  # ceil division
-    page = min(page, total_pages)
-    paged_closed = closed_pairs[(page - 1) * per_page : (page - 1) * per_page + per_page]
+    paged_closed, page, per_page, total_pages = _paginate(closed_pairs, page, per_page)
     closed_rows = [
         {"entry": entry, "exit": exit_, "pnl": _leg_pnl(entry, exit_)} for entry, exit_ in paged_closed
     ]
 
+    paged_running, running_page, running_per_page, total_running_pages = _paginate(
+        running_orders, running_page, running_per_page
+    )
     # Each running leg needs its owning strategy instance so the dashboard
     # JS can match it to the live-quote poll's per-leg price (keyed
     # "{user_strategy_id}:{security_id}" — see live_pnl.js).
     running_rows = [
         {"order": o, "user_strategy_id": str(o.strategy_run.user_strategy_id) if o.strategy_run else None}
-        for o in running_orders
+        for o in paged_running
     ]
 
     # The two stat-card counts ("Paper Orders (recent)" / "Live Orders
     # (recent)") intentionally still summarize a fixed recent window, not
     # the current page — they're headline counts, not tied to whichever
-    # page/page-size the Closed Orders table happens to be showing.
+    # page/page-size either table happens to be showing.
     paper_count = sum(1 for o in all_orders[-25:] if o.is_paper)
     live_count = sum(1 for o in all_orders[-25:] if not o.is_paper)
 
@@ -121,8 +135,12 @@ def dashboard(request: Request, db: DbSession, current_user: CurrentUser, page: 
             "page": page,
             "per_page": per_page,
             "per_page_choices": ORDERS_PER_PAGE_CHOICES,
-            "total_orders": total_closed,
+            "total_orders": len(closed_pairs),
             "total_pages": total_pages,
+            "running_page": running_page,
+            "running_per_page": running_per_page,
+            "total_running_orders": len(running_orders),
+            "total_running_pages": total_running_pages,
         },
     )
 

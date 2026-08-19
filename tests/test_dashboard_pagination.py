@@ -1,4 +1,4 @@
-"""Router/template test for Closed Orders pagination on the dashboard."""
+"""Router/template test for Closed and Running Orders pagination on the dashboard."""
 
 from __future__ import annotations
 
@@ -169,3 +169,54 @@ def test_dashboard_splits_running_and_closed_orders(client, db_session):
     assert "NIFTY 24500 PE" in resp.text  # the still-open leg
     assert "NIFTY 24000 CE" in resp.text  # the closed pair
     assert "Showing 1 to 1 of 1 closed records" in resp.text  # only the closed pair is counted
+
+
+def _make_running_orders(db_session, user, count: int) -> None:
+    """Creates `count` still-open legs (one order each, no exit) — each
+    under its own run+security so none of them pair off with each other."""
+    now = datetime.now(timezone.utc)
+    for i in range(count):
+        strategy = Strategy(name=f"Test Strategy {i}", code_ref="x", is_published=True)
+        db_session.add(strategy)
+        db_session.flush()
+        user_strategy = UserStrategy(user_id=user.id, strategy_id=strategy.id, mode=StrategyMode.PAPER)
+        db_session.add(user_strategy)
+        db_session.flush()
+        run = StrategyRun(user_strategy_id=user_strategy.id, status="open", legs_planned={})
+        db_session.add(run)
+        db_session.flush()
+        db_session.add(Order(
+            user_id=user.id, strategy_run_id=run.id, security_id=str(2000 + i),
+            trading_symbol=f"NIFTY {25000 + i * 50} PE",
+            transaction_type="SELL", quantity=75, order_type="LIMIT", product_type="INTRADAY",
+            price=50.0 + i, status=OrderStatus.PAPER_FILLED, is_paper=True,
+            placed_at=now - timedelta(minutes=i),  # newest first == i=0
+        ))
+    db_session.commit()
+
+
+def test_dashboard_paginates_running_orders_independently_of_closed(client, db_session):
+    user = _register_and_login(client, db_session, "trader@example.com")
+    _make_running_orders(db_session, user, 12)
+
+    resp = client.get("/dashboard?running_per_page=10")
+    assert resp.status_code == 200
+    assert "Showing 1 to 10 of 12 running records" in resp.text
+    assert "Page 1 of 2" in resp.text
+
+    resp2 = client.get("/dashboard?running_per_page=10&running_page=2")
+    assert resp2.status_code == 200
+    assert "Showing 11 to 12 of 12 running records" in resp2.text
+
+
+def test_dashboard_running_and_closed_pagination_are_independent(client, db_session):
+    """Paging through Closed Orders must not disturb which page Running
+    Orders is showing, and vice versa — they're two separate query params."""
+    user = _register_and_login(client, db_session, "trader@example.com")
+    _make_orders(db_session, user, 15)  # 15 closed pairs
+    _make_running_orders(db_session, user, 3)  # 3 running legs, well under one page
+
+    resp = client.get("/dashboard?page=2&per_page=10")
+    assert resp.status_code == 200
+    assert "Showing 11 to 15 of 15 closed records" in resp.text
+    assert "Showing 1 to 3 of 3 running records" in resp.text  # running still on its own page 1
