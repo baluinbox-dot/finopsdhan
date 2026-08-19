@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import threading
 import time
-from typing import Any
+from typing import Any, Callable
 
 import pandas as pd
 from dhanhq import dhanhq
@@ -32,6 +32,25 @@ _security_master_cache: pd.DataFrame | None = None
 _option_chain_lock = threading.Lock()
 _option_chain_last_call_at: float = 0.0
 _OPTION_CHAIN_MIN_INTERVAL_SECONDS = 3.0
+
+
+def _call_with_retry(fn: Callable[[], Any], *, attempts: int = 2, base_delay: float = 1.0) -> Any:
+    """Retry a read-only Dhan call once on a transient failure (timeout,
+    connection reset), with a short backoff. Only ever wrap read-only calls
+    with this — a retried write call (place_order) could double-fill if
+    Dhan actually processed the first attempt but the response was lost in
+    transit; every order placement in this app deliberately fails once
+    rather than blindly resubmitting."""
+    last_exc: Exception | None = None
+    for attempt in range(attempts):
+        try:
+            return fn()
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            if attempt < attempts - 1:
+                time.sleep(base_delay * (attempt + 1))
+    assert last_exc is not None
+    raise last_exc
 
 
 def _throttle_option_chain() -> None:
@@ -111,7 +130,7 @@ def fetch_quotes(dhan_client: "dhanhq", securities: dict[str, list[Any]]) -> dic
     fresh quote available," not raise.
     """
     try:
-        response = dhan_client.quote_data(securities)
+        response = _call_with_retry(lambda: dhan_client.quote_data(securities))
     except Exception:  # noqa: BLE001
         return {}
     if response.get("status") != "success":
@@ -134,7 +153,7 @@ def fetch_spot_price(dhan_client: "dhanhq", exchange_segment: str, security_id: 
     ticker_data. Returns None (never raises) if the quote isn't available
     this call — callers should skip evaluation this pass, not guess."""
     try:
-        response = dhan_client.ticker_data({exchange_segment: [security_id]})
+        response = _call_with_retry(lambda: dhan_client.ticker_data({exchange_segment: [security_id]}))
     except Exception:  # noqa: BLE001
         return None
     if response.get("status") != "success":

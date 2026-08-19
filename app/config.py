@@ -21,6 +21,20 @@ class Settings(BaseSettings):
     strategy_poll_interval_seconds: int = 30
     allow_live_trading: bool = False
 
+    # The dhanhq SDK's own default is 60s per HTTP call (see
+    # DhanHTTP.HTTP_DEFAULT_TIME_OUT) — far too long for a background
+    # scheduler tick to be stuck on one slow/hanging call. Applied in
+    # app.dhan.client.get_user_dhan_client.
+    dhan_http_timeout_seconds: int = 20
+
+    # How many UserStrategy evaluations the scheduler's tick runs
+    # concurrently (see app.engine.scheduler). Each active strategy makes
+    # blocking Dhan HTTP calls; running them one at a time in a single
+    # thread means one slow/hung user's call delays every other user's
+    # strategy check behind it in the same tick. Kept modest by default so
+    # a resource-constrained deploy (small VM) isn't overwhelmed.
+    strategy_poll_max_workers: int = 4
+
     server_static_ip: str = ""
 
     # Empty locally (app served at the domain root, e.g. http://127.0.0.1:8000/).

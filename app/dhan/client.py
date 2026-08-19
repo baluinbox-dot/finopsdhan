@@ -14,6 +14,7 @@ from typing import Any
 from dhanhq import DhanContext, DhanLogin, dhanhq
 from sqlalchemy.orm import Session
 
+from app.config import get_settings
 from app.dhan.helpers import format_dhan_error
 from app.models import DhanCredential, User
 from app.security import decrypt_secret
@@ -40,6 +41,10 @@ def get_user_dhan_client(db: Session, user: User) -> UserDhanClient:
     access_token = decrypt_secret(credential.access_token_encrypted)
     context = DhanContext(credential.client_id, access_token)
     client = dhanhq(context)
+    # SDK default is 60s per HTTP call — one slow/hung request would stall
+    # a whole scheduler tick. Shorten it for every call made through this
+    # client (quotes, orders, option chain, ...).
+    client.dhan_http.timeout = get_settings().dhan_http_timeout_seconds
     return UserDhanClient(client=client, context=context, client_id=credential.client_id)
 
 
