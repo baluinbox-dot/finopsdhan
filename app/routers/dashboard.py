@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Request
 from fastapi.responses import RedirectResponse
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.dhan.client import DhanNotConnectedError, get_user_dhan_client
 from app.deps import CurrentUser, DbSession
@@ -16,21 +16,46 @@ from app.templating import flash, render, url
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 
+# Recent Orders pagination — page-size choices offered in the UI. An
+# out-of-list value in the query string (tampered or stale link) falls
+# back to the default rather than erroring.
+ORDERS_PER_PAGE_CHOICES = (5, 10, 15, 20, 25, 50, 100)
+ORDERS_PER_PAGE_DEFAULT = 10
+
 
 @router.get("")
-def dashboard(request: Request, db: DbSession, current_user: CurrentUser):
+def dashboard(request: Request, db: DbSession, current_user: CurrentUser, page: int = 1, per_page: int = ORDERS_PER_PAGE_DEFAULT):
     user_strategies = db.scalars(
         select(UserStrategy).where(UserStrategy.user_id == current_user.id)
     ).all()
     active_count = sum(1 for us in user_strategies if us.is_active)
     open_run_ids = {us.id for us in user_strategies if find_open_run(us) is not None}
 
+    if per_page not in ORDERS_PER_PAGE_CHOICES:
+        per_page = ORDERS_PER_PAGE_DEFAULT
+    page = max(1, page)
+
+    total_orders = db.scalar(select(func.count()).select_from(Order).where(Order.user_id == current_user.id)) or 0
+    total_pages = max(1, -(-total_orders // per_page))  # ceil division
+    page = min(page, total_pages)
+
     recent_orders = db.scalars(
-        select(Order).where(Order.user_id == current_user.id).order_by(Order.placed_at.desc()).limit(25)
+        select(Order)
+        .where(Order.user_id == current_user.id)
+        .order_by(Order.placed_at.desc())
+        .offset((page - 1) * per_page)
+        .limit(per_page)
     ).all()
 
-    paper_orders = [o for o in recent_orders if o.is_paper]
-    live_orders = [o for o in recent_orders if not o.is_paper]
+    # The two stat-card counts ("Paper Orders (recent)" / "Live Orders
+    # (recent)") intentionally still summarize a fixed recent window, not
+    # the current page — they're headline counts, not tied to whichever
+    # page/page-size the Recent Orders table happens to be showing.
+    recent_for_counts = db.scalars(
+        select(Order).where(Order.user_id == current_user.id).order_by(Order.placed_at.desc()).limit(25)
+    ).all()
+    paper_count = sum(1 for o in recent_for_counts if o.is_paper)
+    live_count = sum(1 for o in recent_for_counts if not o.is_paper)
 
     return render(
         request,
@@ -41,9 +66,14 @@ def dashboard(request: Request, db: DbSession, current_user: CurrentUser):
             "active_count": active_count,
             "open_run_ids": open_run_ids,
             "recent_orders": recent_orders,
-            "paper_count": len(paper_orders),
-            "live_count": len(live_orders),
+            "paper_count": paper_count,
+            "live_count": live_count,
             "has_dhan": current_user.dhan_credential is not None and current_user.dhan_credential.is_active,
+            "page": page,
+            "per_page": per_page,
+            "per_page_choices": ORDERS_PER_PAGE_CHOICES,
+            "total_orders": total_orders,
+            "total_pages": total_pages,
         },
     )
 
