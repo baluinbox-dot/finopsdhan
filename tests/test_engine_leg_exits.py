@@ -54,10 +54,20 @@ def _fresh_quote(security_id: str, price: float) -> dict:
     }
 
 
+def _fresh_quotes(*pairs: tuple[str, float]) -> dict:
+    return {
+        "status": "success",
+        "data": {"status": "success", "data": {"NSE_FNO": {sid: {"last_price": price} for sid, price in pairs}}},
+    }
+
+
 def test_apply_leg_exits_closes_only_named_legs_and_persists_state(db_session):
     run = _make_open_run(db_session)
     dhan = MagicMock()
-    dhan.quote_data.return_value = _fresh_quote("81", 82.0)  # CE exit fill price
+    # Fresh quotes for both legs being closed — a real batch response, not
+    # a partial one (see test_apply_leg_exits_skips_when_a_quote_is_missing
+    # for what happens when one is absent).
+    dhan.quote_data.return_value = _fresh_quotes(("81", 82.0), ("91", 3.0))
 
     decision = {"close_security_ids": ["81", "91"], "leg_state_patch": {"31": {"sl_moved_to_cost": True}}}
     _apply_leg_exits(db_session, dhan, run.user_strategy.user_id, run, decision, is_live=False)
@@ -77,14 +87,32 @@ def test_apply_leg_exits_closes_only_named_legs_and_persists_state(db_session):
     assert exit_orders["81"].transaction_type == "BUY"  # reversing a SELL
     assert exit_orders["81"].price == 82.0
     assert exit_orders["91"].transaction_type == "SELL"  # reversing a BUY hedge
+    assert exit_orders["91"].price == 3.0
 
-    # Realized P&L only reflects the two legs actually closed this pass:
-    # CE sell 60 -> bought back 82 (loss). The CE hedge (91) has no fresh
-    # quote in this mock, so it falls back to its own entry price (8.0) as
-    # its exit price -> zero P&L contribution, not a guessed number.
-    expected = (60.0 - 82.0) * 75 + 0.0
+    # CE sell 60 -> bought back 82 (loss) + CE hedge bought 8 -> sold 3 (loss).
+    expected = (60.0 - 82.0) * 75 + (3.0 - 8.0) * 75
     assert float(run.realized_pnl) == expected
     assert run.closed_at is None  # run still open (PE leg remains) -> not closed yet
+
+
+def test_apply_leg_exits_skips_when_a_quote_is_missing(db_session):
+    """Mirrors test_apply_rolls_skips_roll_when_a_fresh_exit_quote_is_
+    unavailable: if any leg in this exit decision can't get a fresh quote,
+    nothing is closed and no leg_state_patch is applied — never fall back
+    to a leg's stored entry price, which would fake a flat/no-op fill."""
+    run = _make_open_run(db_session)
+    dhan = MagicMock()
+    dhan.quote_data.return_value = _fresh_quote("81", 82.0)  # "91"'s quote is absent
+
+    decision = {"close_security_ids": ["81", "91"], "leg_state_patch": {"31": {"sl_moved_to_cost": True}}}
+    _apply_leg_exits(db_session, dhan, run.user_strategy.user_id, run, decision, is_live=False)
+
+    db_session.refresh(run)
+    assert run.status == "open"
+    assert run.legs_planned.get("leg_state") is None  # nothing touched, patch not applied either
+    assert float(run.realized_pnl or 0) == 0.0
+    orders = db_session.query(Order).filter(Order.strategy_run_id == run.id).all()
+    assert orders == []
 
 
 def test_apply_leg_exits_closes_run_when_last_primary_leg_closes(db_session):
@@ -94,7 +122,7 @@ def test_apply_leg_exits_closes_run_when_last_primary_leg_closes(db_session):
     db_session.commit()
 
     dhan = MagicMock()
-    dhan.quote_data.return_value = _fresh_quote("31", 5.0)
+    dhan.quote_data.return_value = _fresh_quotes(("31", 5.0), ("21", 1.0))
 
     decision = {"close_security_ids": ["31", "21"], "leg_state_patch": {}}
     _apply_leg_exits(db_session, dhan, run.user_strategy.user_id, run, decision, is_live=False)
@@ -104,9 +132,8 @@ def test_apply_leg_exits_closes_run_when_last_primary_leg_closes(db_session):
     leg_state = run.legs_planned["leg_state"]
     assert all(v["status"] == "closed" for v in leg_state.values())
 
-    # PE sell 55 -> bought back 5 (profit); PE hedge (21) has no fresh
-    # quote here, falls back to its own entry price -> zero contribution.
-    assert float(run.realized_pnl) == (55.0 - 5.0) * 75
+    # PE sell 55 -> bought back 5 (profit) + PE hedge bought 10 -> sold 1 (loss).
+    assert float(run.realized_pnl) == (55.0 - 5.0) * 75 + (1.0 - 10.0) * 75
     assert run.closed_at is not None
 
 
@@ -145,14 +172,14 @@ def test_realized_pnl_accumulates_across_two_partial_exit_passes(db_session):
     dhan = MagicMock()
 
     # Pass 1: CE leg + its hedge close.
-    dhan.quote_data.return_value = _fresh_quote("81", 82.0)
+    dhan.quote_data.return_value = _fresh_quotes(("81", 82.0), ("91", 3.0))
     _apply_leg_exits(
         db_session, dhan, run.user_strategy.user_id, run,
         {"close_security_ids": ["81", "91"], "leg_state_patch": {}}, is_live=False,
     )
     db_session.refresh(run)
     first_pass_pnl = float(run.realized_pnl)
-    assert first_pass_pnl == (60.0 - 82.0) * 75  # CE hedge (91) has no quote here -> 0 contribution
+    assert first_pass_pnl == (60.0 - 82.0) * 75 + (3.0 - 8.0) * 75
     assert run.status == "open"  # PE leg still open
 
     # Pass 2: PE leg + its hedge close, finishing the run.
