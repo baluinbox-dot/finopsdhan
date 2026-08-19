@@ -1,0 +1,169 @@
+{% extends "base.html" %}
+{% block title %}Configure {{ strategy.name }} — FinOps Dhan Algo{% endblock %}
+{% block content %}
+<h4 class="mb-1">{{ 'Reconfigure: ' ~ (existing.label or strategy.name) if existing else 'Add New Instance: ' ~ strategy.name }}</h4>
+<p class="text-body-secondary">{{ strategy.description }}</p>
+{% if not existing %}
+<p class="small text-body-secondary">
+    This creates a <strong>new, independent instance</strong> — any other instances of this strategy (or of the
+    original 3-Pair Rolling strategy) you already have running keep running untouched.
+</p>
+{% endif %}
+
+{% if not has_dhan %}
+<div class="alert alert-warning">
+    Connect your Dhan account on the <a href="{{ url('/settings/dhan') }}">Settings page</a> before configuring this strategy —
+    the expiry and strike info below is fetched live from your own Dhan connection.
+</div>
+{% else %}
+
+<div class="card stat-card mb-3" style="max-width: 720px;">
+    <div class="card-body">
+        <form method="get" action="{{ url('/strategies/' ~ strategy.id ~ '/configure-rolling-legsl') }}" class="row g-2 align-items-end">
+            <input type="hidden" name="user_strategy_id" value="{{ user_strategy_id }}">
+            <div class="col-auto">
+                <label class="form-label small mb-0">Underlying</label>
+                <select name="underlying" class="form-select form-select-sm" onchange="this.form.submit()">
+                    {% for key, meta in underlyings.items() %}
+                    <option value="{{ key }}" {{ 'selected' if key == selected_underlying else '' }}>{{ meta.label }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-auto">
+                <label class="form-label small mb-0">Expiry</label>
+                <select name="expiry" class="form-select form-select-sm" onchange="this.form.submit()" {{ 'disabled' if not expiries else '' }}>
+                    {% for exp in expiries %}
+                    <option value="{{ exp }}" {{ 'selected' if exp == selected_expiry else '' }}>{{ exp }}</option>
+                    {% else %}
+                    <option>No expiries available</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-auto">
+                <button class="btn btn-outline-secondary btn-sm" type="submit">Refresh Strikes</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+{% if expiry_error %}
+<div class="alert alert-danger">{{ expiry_error }}</div>
+{% endif %}
+
+{% if atm_preview %}
+<div class="alert alert-info">
+    Spot <strong>{{ '%.2f'|format(atm_preview.spot) }}</strong> — at a {{ atm_preview.gap | int }}pt gap, the initial window would be
+    T <strong>{{ atm_preview.top | int }}</strong>, M (ATM) <strong>{{ atm_preview.middle | int }}</strong>,
+    B <strong>{{ atm_preview.bottom | int }}</strong>. This uses the Strike Gap value below — change it and refresh
+    to see the window at a different spacing.
+</div>
+{% endif %}
+
+<div class="card stat-card" style="max-width: 720px;">
+    <div class="card-body">
+        <form method="post" action="{{ url('/strategies/' ~ strategy.id ~ '/configure-rolling-legsl') }}" class="row g-3">
+            <input type="hidden" name="user_strategy_id" value="{{ user_strategy_id }}">
+            <input type="hidden" name="underlying" value="{{ selected_underlying }}">
+            <input type="hidden" name="expiry" value="{{ selected_expiry }}">
+
+            <div class="col-12">
+                <div class="small text-body-secondary mb-1">
+                    {{ underlyings[selected_underlying].label }} · 3-pair rolling · individual leg SL &amp; target ·
+                    {{ selected_expiry or 'no expiry selected' }}
+                </div>
+            </div>
+
+            <div class="col-12">
+                <label class="form-label">Instance Name</label>
+                <input type="text" name="label" value="{{ existing.label if existing else '' }}" maxlength="120"
+                       class="form-control" placeholder="e.g. NIFTY Rolling Leg-SL — auto-generated if left blank">
+            </div>
+
+            <div class="col-md-4">
+                <label class="form-label">Lots per Pair</label>
+                <input type="number" name="lots" min="1" value="{{ params.lots }}" class="form-control">
+            </div>
+            <div class="col-md-4">
+                <label class="form-label">Strike Gap</label>
+                <input type="number" step="1" min="1" name="strike_gap" value="{{ params.strike_gap }}" class="form-control">
+                <div class="form-text">50 for NIFTY, typically 100 for BANKNIFTY/SENSEX.</div>
+            </div>
+            <div class="col-md-4"></div>
+
+            <div class="col-md-6">
+                <label class="form-label">Start Time</label>
+                <input type="time" name="start_time" value="{{ params.start_time }}" class="form-control">
+                <div class="form-text">The 3 initial pairs are entered at this time (ATM ± strike gap).</div>
+            </div>
+            <div class="col-md-6">
+                <label class="form-label">End Time</label>
+                <input type="time" name="end_time" value="{{ params.end_time }}" class="form-control">
+                <div class="form-text">Every pair force-closes here; no new orders or rolls after.</div>
+            </div>
+
+            <div class="col-12"><hr></div>
+
+            <div class="col-md-6">
+                <label class="form-label">Leg Stop Loss</label>
+                <select name="leg_stop_loss_pct" class="form-select">
+                    <option value="25" {{ 'selected' if params.leg_stop_loss_pct | int == 25 else '' }}>25%</option>
+                    <option value="30" {{ 'selected' if params.leg_stop_loss_pct | int == 30 else '' }}>30%</option>
+                </select>
+                <div class="form-text">
+                    Applies to each CE/PE leg's own entry premium. When one leg hits its stop, only that leg
+                    closes — its sibling (the other side of the same pair) has its stop trailed to cost (0% loss
+                    allowed from then on).
+                </div>
+            </div>
+            <div class="col-md-6">
+                <label class="form-label">Leg Target</label>
+                <select name="leg_target_pct" class="form-select">
+                    <option value="70" {{ 'selected' if params.leg_target_pct | int == 70 else '' }}>70%</option>
+                    <option value="80" {{ 'selected' if params.leg_target_pct | int == 80 else '' }}>80%</option>
+                </select>
+                <div class="form-text">
+                    When one leg hits its own target, only that leg closes — its sibling keeps running untouched
+                    (no cost-trail on a target hit, only on a stop-loss).
+                </div>
+            </div>
+            <div class="col-12 small text-body-secondary">
+                A pair's T/M/B slot is never closed just because one side exits — the surviving leg keeps running
+                until its own stop/target, or until spot moves far enough for that slot to roll away.
+            </div>
+
+            <div class="col-12"><hr></div>
+
+            <div class="col-md-6">
+                <label class="form-label">Daily Stop-Loss (₹)</label>
+                <input type="number" step="1" name="daily_stop_loss" value="{{ params.daily_stop_loss }}" class="form-control">
+            </div>
+            <div class="col-md-6">
+                <label class="form-label">Daily Target (₹)</label>
+                <input type="number" step="1" name="daily_target" value="{{ params.daily_target }}" class="form-control">
+            </div>
+            <div class="col-12 small text-body-secondary">
+                Checked continuously against the <strong>combined</strong> live P&amp;L across everything still open
+                plus everything already realized today — whichever hits first closes every remaining leg and stops
+                the strategy for the rest of the day. Set either to 0 to disable it.
+            </div>
+
+            <div class="col-12"><hr></div>
+
+            <div class="col-12">
+                <label class="form-label">Mode</label>
+                <select name="mode" class="form-select">
+                    <option value="paper" selected>Paper (simulated)</option>
+                    <option value="live">Live</option>
+                </select>
+            </div>
+
+            <div class="col-12 mt-2">
+                <button id="configureSubmitBtn" class="btn btn-primary w-100" type="submit" {{ 'disabled' if not selected_expiry else '' }}>
+                    {{ 'Update Configuration' if existing else 'Save and Enable' }}
+                </button>
+            </div>
+        </form>
+    </div>
+</div>
+{% endif %}
+{% endblock %}
