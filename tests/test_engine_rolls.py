@@ -136,6 +136,72 @@ def test_apply_rolls_ignores_a_roll_with_nothing_currently_open_to_close(db_sess
     assert _ce_id(24300) not in all_security_ids  # new legs were never opened either
 
 
+def test_apply_rolls_allow_empty_close_opens_new_legs_with_nothing_to_reverse(db_session):
+    """Opt-in support for app.strategies.three_pair_rolling_leg_sl_target:
+    a strike whose legs already exited independently (own SL/target) still
+    needs its slot refilled at the roll boundary — allow_empty_close lets
+    that happen with nothing actually reversed. Without the flag (previous
+    test) the exact same close_security_ids/legs_planned state is silently
+    skipped — this is the one narrow case where it must proceed instead."""
+    run = _make_open_run(db_session)
+    run.legs_planned = {**run.legs_planned, "leg_state": {_ce_id(24450): {"status": "closed"}, _pe_id(24450): {"status": "closed"}}}
+    db_session.commit()
+
+    dhan = MagicMock()
+    new_legs = _roll_leg("FIN1", 24300, 90.0)
+    decision = {"rolls": [{
+        "close_security_ids": [_ce_id(24450), _pe_id(24450)],
+        "new_legs": new_legs,
+        "allow_empty_close": True,
+        "leg_state_patch": {_ce_id(24450): {"in_window": False}, _pe_id(24450): {"in_window": False}},
+    }]}
+
+    _apply_rolls(db_session, dhan, run.user_strategy.user_id, run, decision, is_live=False)
+
+    db_session.refresh(run)
+    dhan.quote_data.assert_not_called()  # nothing to reverse -> no exit-quote fetch needed
+    leg_state = run.legs_planned["leg_state"]
+    # The already-closed legs are untouched except for the patch (status stays "closed").
+    assert leg_state[_ce_id(24450)] == {"status": "closed", "in_window": False}
+    assert leg_state[_pe_id(24450)] == {"status": "closed", "in_window": False}
+    # The new pair opened despite nothing being reversed.
+    assert leg_state[_ce_id(24300)]["status"] == "open"
+    assert leg_state[_pe_id(24300)]["status"] == "open"
+    all_security_ids = {leg["security_id"] for leg in run.legs_planned["legs"]}
+    assert _ce_id(24300) in all_security_ids and _pe_id(24300) in all_security_ids
+
+    # Only the 2 new entry orders were placed — no exit orders, since there
+    # was nothing open to reverse.
+    orders = db_session.query(Order).filter(Order.strategy_run_id == run.id).all()
+    assert {o.security_id for o in orders} == {_ce_id(24300), _pe_id(24300)}
+    assert all(o.transaction_type == "SELL" for o in orders)
+    assert float(run.realized_pnl or 0) == 0.0  # nothing reversed -> no P&L contribution from this roll
+
+
+def test_apply_rolls_leg_state_patch_applies_even_for_legs_not_closed_this_call(db_session):
+    """leg_state_patch can tag a currently-open, untouched leg too (e.g. a
+    strategy trailing something unrelated to the roll itself) — mirrors
+    _apply_leg_exits's existing leg_state_patch contract exactly."""
+    run = _make_open_run(db_session)
+    dhan = MagicMock()
+    dhan.quote_data.return_value = {
+        "status": "success",
+        "data": {"status": "success", "data": {"NSE_FNO": {_ce_id(24450): {"last_price": 40.0}, _pe_id(24450): {"last_price": 70.0}}}},
+    }
+    new_legs = _roll_leg("FIN1", 24300, 90.0)
+    decision = {"rolls": [{
+        "close_security_ids": [_ce_id(24450), _pe_id(24450)],
+        "new_legs": new_legs,
+        "leg_state_patch": {_ce_id(24400): {"sl_at_cost": True}},  # FIN2's CE, untouched by this roll
+    }]}
+
+    _apply_rolls(db_session, dhan, run.user_strategy.user_id, run, decision, is_live=False)
+
+    db_session.refresh(run)
+    leg_state = run.legs_planned["leg_state"]
+    assert leg_state[_ce_id(24400)] == {"status": "open", "sl_at_cost": True}  # patched, not closed, not rolled
+
+
 def test_apply_rolls_final_close_via_close_open_run_skips_rolled_away_legs(db_session):
     """After a roll, a later whole-run close (daily SL/target/end-time)
     must only reverse what's currently open — not the strikes a pair

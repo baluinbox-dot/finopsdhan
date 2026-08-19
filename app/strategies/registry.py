@@ -12,12 +12,14 @@ from app.strategies.base import Strategy
 from app.strategies.example_short_strangle import ExampleShortStrangle
 from app.strategies.single_leg_seller_hedge import SingleLegSellerWithHedge
 from app.strategies.three_pair_rolling import ThreePairRollingStrategy
+from app.strategies.three_pair_rolling_leg_sl_target import ThreePairRollingLegSLTargetStrategy
 
 STRATEGY_REGISTRY: dict[str, type[Strategy]] = {
     "example_short_strangle": ExampleShortStrangle,
     "single_leg_seller_hedge": SingleLegSellerWithHedge,
     "atm_straddle_trigger_hedge": ATMStraddleTriggerHedge,
     "three_pair_rolling": ThreePairRollingStrategy,
+    "three_pair_rolling_leg_sl_target": ThreePairRollingLegSLTargetStrategy,
 }
 
 # code_refs whose configuration is rich enough to need a dedicated
@@ -28,6 +30,7 @@ RICH_CONFIG_STRATEGIES: set[str] = {
     "single_leg_seller_hedge",
     "atm_straddle_trigger_hedge",
     "three_pair_rolling",
+    "three_pair_rolling_leg_sl_target",
 }
 
 

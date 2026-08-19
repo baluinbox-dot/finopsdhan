@@ -265,45 +265,67 @@ def _apply_rolls(
             if str(leg["security_id"]) in close_ids and _open_leg_state(str(leg["security_id"]), leg_state)["status"] == "open"
         ]
         new_legs = roll.get("new_legs") or []
-        if not to_close or not new_legs:
+        # A roll normally requires something real currently open to reverse
+        # (see test_apply_rolls_ignores_a_roll_with_nothing_currently_open_
+        # to_close) — that guard exists to stop a stale decision from
+        # half-executing (opening new legs without actually reversing the
+        # old ones). A strategy whose legs can also close independently
+        # (e.g. a per-leg stop-loss/target) can legitimately reach a roll
+        # boundary with nothing left open at the old strike — both of that
+        # strike's legs already exited on their own before spot ever got
+        # there. That's opted into explicitly via allow_empty_close rather
+        # than loosening the guard for every strategy; no existing
+        # evaluate_rolls implementation sets it, so this branch is
+        # unreachable for them and their behavior is unchanged.
+        if not new_legs or (not to_close and not roll.get("allow_empty_close")):
             continue  # nothing valid to do for this roll — skip it, don't half-execute
 
-        securities_by_segment: dict[str, list[int]] = {}
-        for leg in to_close:
-            securities_by_segment.setdefault(leg["exchange_segment"], []).append(int(leg["security_id"]))
-        quotes = fetch_quotes(dhan_client, securities_by_segment)
+        if to_close:
+            securities_by_segment: dict[str, list[int]] = {}
+            for leg in to_close:
+                securities_by_segment.setdefault(leg["exchange_segment"], []).append(int(leg["security_id"]))
+            quotes = fetch_quotes(dhan_client, securities_by_segment)
 
-        for leg_data in to_close:
-            quote = quotes.get((leg_data["exchange_segment"], str(leg_data["security_id"])))
-            if quote is not None:
-                exit_price = float(quote.get("last_price", leg_data["price"]))
-            else:
-                exit_price = leg_data["price"]
-                logger.warning(
-                    "Could not fetch fresh exit quote for %s during roll; using last known price.", leg_data["security_id"]
+            for leg_data in to_close:
+                quote = quotes.get((leg_data["exchange_segment"], str(leg_data["security_id"])))
+                if quote is not None:
+                    exit_price = float(quote.get("last_price", leg_data["price"]))
+                else:
+                    exit_price = leg_data["price"]
+                    logger.warning(
+                        "Could not fetch fresh exit quote for %s during roll; using last known price.", leg_data["security_id"]
+                    )
+
+                exit_leg = OrderLeg(
+                    label=f"ROLL-CLOSE {leg_data['label']}",
+                    security_id=leg_data["security_id"],
+                    trading_symbol=leg_data["trading_symbol"],
+                    exchange_segment=leg_data["exchange_segment"],
+                    transaction_type=_opposite(leg_data["transaction_type"]),
+                    quantity=leg_data["quantity"],
+                    order_type=leg_data["order_type"],
+                    product_type=leg_data["product_type"],
+                    price=exit_price,
+                    role=leg_data.get("role", "primary"),
                 )
-
-            exit_leg = OrderLeg(
-                label=f"ROLL-CLOSE {leg_data['label']}",
-                security_id=leg_data["security_id"],
-                trading_symbol=leg_data["trading_symbol"],
-                exchange_segment=leg_data["exchange_segment"],
-                transaction_type=_opposite(leg_data["transaction_type"]),
-                quantity=leg_data["quantity"],
-                order_type=leg_data["order_type"],
-                product_type=leg_data["product_type"],
-                price=exit_price,
-                role=leg_data.get("role", "primary"),
-            )
-            _place_or_paper_leg(db, dhan_client, user_id, open_run.id, exit_leg, is_live=is_live)
-            pnl_delta += leg_pnl(leg_data, exit_price)
-            sid = str(leg_data["security_id"])
-            leg_state[sid] = {**_open_leg_state(sid, leg_state), "status": "closed"}
+                _place_or_paper_leg(db, dhan_client, user_id, open_run.id, exit_leg, is_live=is_live)
+                pnl_delta += leg_pnl(leg_data, exit_price)
+                sid = str(leg_data["security_id"])
+                leg_state[sid] = {**_open_leg_state(sid, leg_state), "status": "closed"}
 
         for new_leg in new_legs:
             _place_or_paper_leg(db, dhan_client, user_id, open_run.id, new_leg, is_live=is_live)
             legs_data.append(asdict(new_leg))
             leg_state[str(new_leg.security_id)] = {"status": "open"}
+
+        # Opt-in, mirrors _apply_leg_exits's leg_state_patch: lets a roll
+        # tag arbitrary sids (open or already closed) — e.g. flagging every
+        # leg that was ever part of a rolled-away strike as no longer in
+        # the active window, even the ones that closed independently
+        # earlier and were therefore never in to_close.
+        for sid, patch in (roll.get("leg_state_patch") or {}).items():
+            sid = str(sid)
+            leg_state[sid] = {**_open_leg_state(sid, leg_state), **patch}
 
         any_rolled = True
 

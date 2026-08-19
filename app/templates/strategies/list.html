@@ -16,7 +16,7 @@
 <div class="row g-3">
     {% for s in strategies %}
     {% set instances = my_instances.get(s.id, []) %}
-    {% set configure_action = 'configure-straddle' if s.code_ref == 'atm_straddle_trigger_hedge' else ('configure-rolling' if s.code_ref == 'three_pair_rolling' else 'configure') %}
+    {% set configure_action = 'configure-straddle' if s.code_ref == 'atm_straddle_trigger_hedge' else ('configure-rolling-legsl' if s.code_ref == 'three_pair_rolling_leg_sl_target' else ('configure-rolling' if s.code_ref == 'three_pair_rolling' else 'configure')) %}
     <div class="col-12 col-md-6 col-xl-4">
         <div class="card stat-card h-100">
             <div class="card-body d-flex flex-column">
