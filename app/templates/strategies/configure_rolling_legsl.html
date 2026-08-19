@@ -133,6 +133,28 @@
 
             <div class="col-12"><hr></div>
 
+            <div class="col-12 form-check">
+                <input type="checkbox" class="form-check-input" id="hedgeEnabled" name="hedge_enabled"
+                       value="true" {{ 'checked' if params.hedge_enabled else '' }}>
+                <label class="form-check-label" for="hedgeEnabled">Buy a hedge (CE + PE) for the combined position</label>
+            </div>
+            <div class="col-md-6">
+                <label class="form-label">Hedge Target Premium (₹)</label>
+                <input type="number" step="0.5" min="0" name="hedge_premium_target"
+                       value="{{ params.hedge_premium_target }}" class="form-control">
+                <div class="form-text">
+                    Buys the CE and PE whose live premium is closest to this (e.g. 5 or 10) — one of each,
+                    protecting all three pairs' combined exposure at once. Lot size is <strong>3&times; your
+                    Lots per Pair</strong> above (one hedge per side, sized for all three pairs together), bought
+                    once at entry and held unchanged all day — it does not roll with T/M/B, is never touched by
+                    the per-leg stop-loss/target above, and closes together with everything else at the daily
+                    stop-loss/target, end time, or a manual Close Now.
+                </div>
+            </div>
+            <div class="col-md-6"></div>
+
+            <div class="col-12"><hr></div>
+
             <div class="col-md-6">
                 <label class="form-label">Daily Stop-Loss (₹)</label>
                 <input type="number" step="1" name="daily_stop_loss" value="{{ params.daily_stop_loss }}" class="form-control">

@@ -38,8 +38,15 @@ from the T/M/B calculation) until a roll actually moves that slot away,
 at which point every leg that was ever part of it (open or not) is
 patched to `in_window: False`.
 
-No hedge — not part of this strategy's spec (unlike the original, which
-has an optional combined hedge for all three pairs).
+An optional hedge (one CE buy + one PE buy, picked by nearest live premium
+to a target price, e.g. Rs 5 or Rs 10) protects the *combined* exposure of
+all three pairs at once — identical to the original strategy's hedge:
+sized at `lots * 3`, bought once at entry, never rolls with the T/M/B
+window, and closes together with everything else via the whole-position
+close path (daily stop-loss/target, end time, or a manual Close Now). The
+hedge is a `role == "hedge"` leg throughout, so it's automatically
+excluded from the per-leg stop-loss/target logic above (which only ever
+acts on `role == "primary"` legs) and from T/M/B window tracking.
 """
 
 from __future__ import annotations
@@ -50,7 +57,14 @@ from datetime import time as dt_time
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from app.dhan.helpers import UNDERLYINGS, fetch_chain_df, fetch_quotes, fetch_spot_price, get_lot_size
+from app.dhan.helpers import (
+    UNDERLYINGS,
+    fetch_chain_df,
+    fetch_quotes,
+    fetch_spot_price,
+    find_strike_by_nearest_premium,
+    get_lot_size,
+)
 from app.strategies.base import OrderLeg, Strategy, StrategyContext, leg_pnl
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -108,7 +122,7 @@ class ThreePairRollingLegSLTargetStrategy(Strategy):
         "trails its sibling's stop to cost; one leg hitting its target closes only that "
         "leg, sibling untouched. The T/M/B window keeps rolling exactly as before. A "
         "combined daily stop-loss/target and end time still close everything and stop the "
-        "strategy for the day. No hedge."
+        "strategy for the day. Same optional combined hedge as the original strategy."
     )
     default_params = {
         "underlying": "NIFTY",
@@ -121,9 +135,11 @@ class ThreePairRollingLegSLTargetStrategy(Strategy):
         "leg_target_pct": 80,  # 70 or 80, per leg's own entry premium
         "daily_stop_loss": 10000,
         "daily_target": 15000,
+        "hedge_enabled": False,
+        "hedge_premium_target": 5,  # buy the closest-premium CE/PE hedge to this price
     }
 
-    # --- entry: identical T/M/B window construction to the original strategy, no hedge ---
+    # --- entry: identical T/M/B window construction to the original strategy ---
 
     def evaluate_entry(self, ctx: StrategyContext) -> list[OrderLeg] | None:
         p = {**self.default_params, **ctx.params}
@@ -205,6 +221,36 @@ class ThreePairRollingLegSLTargetStrategy(Strategy):
                 price=float(row["pe_ltp"]),
                 role="primary",
             ))
+
+        if p.get("hedge_enabled"):
+            # One CE hedge + one PE hedge cover all three pairs' combined
+            # exposure at once (not one hedge per pair) — sized at 3x the
+            # per-pair lot count, identical to the original strategy. Picked
+            # once, from the initial ATM, and never touched again today.
+            atm_index = strikes.index(m_strike)
+            hedge_target = float(p.get("hedge_premium_target") or 0)
+            hedge_quantity = (lot_size or 0) * int(p["lots"]) * 3
+            for option_type, price_col, sid_col in (("CE", "ce_ltp", "ce_security_id"), ("PE", "pe_ltp", "pe_security_id")):
+                best_strike, best_row = find_strike_by_nearest_premium(
+                    chain_df, strikes, atm_index, option_type, price_col, sid_col, hedge_target, include_start=False,
+                )
+                if best_row is None:
+                    # Hedge was requested but no valid candidate strike was
+                    # found this pass — never go live naked when a hedge
+                    # was asked for; skip entry and retry next poll.
+                    return None
+                legs.append(OrderLeg(
+                    label=f"HEDGE BUY {int(best_strike)} {option_type} ({expiry})",
+                    security_id=str(best_row[sid_col]),
+                    trading_symbol=f"{underlying} {int(best_strike)} {option_type} {expiry}",
+                    exchange_segment=meta["option_segment"],
+                    transaction_type="BUY",
+                    quantity=hedge_quantity,
+                    order_type="LIMIT",
+                    product_type="INTRADAY",
+                    price=float(best_row[price_col]),
+                    role="hedge",
+                ))
 
         return legs
 
