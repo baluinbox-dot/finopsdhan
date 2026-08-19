@@ -62,12 +62,17 @@ def _throttle_option_chain() -> None:
         _option_chain_last_call_at = time.monotonic()
 
 # Index underlyings quick-reference (from the dhanhq-skills SKILL.md).
-# security_id is fixed by Dhan; exchange_segment is always the index segment.
+# security_id is fixed by Dhan; exchange_segment is always the index segment
+# (used for spot/option-chain lookups). option_segment is the *derivative*
+# segment its actual option contracts trade on, which every strategy must
+# tag each OrderLeg with — NSE indices' options trade on NSE_FNO, but
+# SENSEX is a BSE index and its options trade on BSE_FNO. Never hardcode
+# "NSE_FNO" on a leg; always pull it from here via the leg's underlying.
 UNDERLYINGS: dict[str, dict[str, Any]] = {
-    "NIFTY": {"security_id": 13, "exchange_segment": "IDX_I", "label": "NIFTY 50"},
-    "BANKNIFTY": {"security_id": 25, "exchange_segment": "IDX_I", "label": "BANK NIFTY"},
-    "FINNIFTY": {"security_id": 27, "exchange_segment": "IDX_I", "label": "FINNIFTY"},
-    "SENSEX": {"security_id": 51, "exchange_segment": "IDX_I", "label": "SENSEX"},
+    "NIFTY": {"security_id": 13, "exchange_segment": "IDX_I", "option_segment": "NSE_FNO", "label": "NIFTY 50"},
+    "BANKNIFTY": {"security_id": 25, "exchange_segment": "IDX_I", "option_segment": "NSE_FNO", "label": "BANK NIFTY"},
+    "FINNIFTY": {"security_id": 27, "exchange_segment": "IDX_I", "option_segment": "NSE_FNO", "label": "FINNIFTY"},
+    "SENSEX": {"security_id": 51, "exchange_segment": "IDX_I", "option_segment": "BSE_FNO", "label": "SENSEX"},
 }
 
 
