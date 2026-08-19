@@ -135,7 +135,7 @@ def _close_open_run(
     is_live: bool,
     reason: str,
     is_manual: bool = False,
-) -> None:
+) -> bool:
     """Reverse every leg on `open_run` that isn't already closed (primary
     and hedge alike) and mark the run closed. Shared by the scheduled
     whole-position exit path and the manual "Close Now" path so they
@@ -145,7 +145,12 @@ def _close_open_run(
     (a per-leg exit via `evaluate_leg_exits`, or a completed roll via
     `evaluate_rolls` — both tracked in `leg_state`) are skipped; most
     strategies never populate `leg_state`, so every leg defaults to open
-    and this behaves exactly as a plain "reverse everything" for them."""
+    and this behaves exactly as a plain "reverse everything" for them.
+
+    Returns True if the run was actually closed, False if it was left open
+    because a fresh quote couldn't be fetched for every leg (see below) —
+    callers that need to tell the user something happened (the manual
+    "Close Now" button) must check this rather than assume success."""
     notes = open_run.legs_planned or {}
     leg_state = notes.get("leg_state") or {}
     legs_data = [
@@ -155,24 +160,31 @@ def _close_open_run(
     # Price exits off fresh quotes, not the stale entry price — reusing the
     # entry price would make paper P&L meaningless and, in live mode, would
     # place a LIMIT order at a price with no relation to the current
-    # market. One batched call for every leg; fall back to each leg's own
-    # entry price only if its fresh quote can't be fetched, so closing
-    # never silently no-ops.
+    # market. One batched call for every leg. If any leg's fresh quote
+    # can't be fetched, never fall back to its stored entry price — that
+    # writes a fabricated "flat" fill indistinguishable from a real one
+    # (see app.engine.runner._apply_rolls for the bug this mirrors).
+    # Leave the whole run open and let it retry next poll/click instead.
     securities_by_segment: dict[str, list[int]] = {}
     for leg_data in legs_data:
         securities_by_segment.setdefault(leg_data["exchange_segment"], []).append(int(leg_data["security_id"]))
     quotes = fetch_quotes(dhan_client, securities_by_segment)
 
+    missing = [
+        leg for leg in legs_data
+        if (leg["exchange_segment"], str(leg["security_id"])) not in quotes
+    ]
+    if missing:
+        logger.warning(
+            "Skipping close of run %s — could not fetch a fresh exit quote for %s; will retry next poll.",
+            open_run.id, [leg["security_id"] for leg in missing],
+        )
+        return False
+
     pnl_delta = 0.0
     for leg_data in legs_data:
-        quote = quotes.get((leg_data["exchange_segment"], str(leg_data["security_id"])))
-        if quote is not None:
-            exit_price = float(quote.get("last_price", leg_data["price"]))
-        else:
-            exit_price = leg_data["price"]
-            logger.warning(
-                "Could not fetch fresh exit quote for %s; using last known price.", leg_data["security_id"]
-            )
+        quote = quotes[(leg_data["exchange_segment"], str(leg_data["security_id"]))]
+        exit_price = float(quote.get("last_price", leg_data["price"]))
 
         exit_leg = OrderLeg(
             label=f"EXIT {leg_data['label']}",
@@ -195,6 +207,7 @@ def _close_open_run(
     open_run.realized_pnl = float(open_run.realized_pnl or 0) + pnl_delta
     open_run.closed_at = datetime.now(timezone.utc)
     db.commit()
+    return True
 
 
 def _execute_entry(
@@ -384,15 +397,25 @@ def _apply_leg_exits(
             securities_by_segment.setdefault(leg["exchange_segment"], []).append(int(leg["security_id"]))
         quotes = fetch_quotes(dhan_client, securities_by_segment)
 
+        # Same "don't fabricate a price" rule as _apply_rolls and
+        # _close_open_run: if any leg due to close can't get a fresh
+        # quote, abort this whole decision — no legs closed, no
+        # leg_state_patch applied — and retry next poll rather than
+        # write an exit order at a price that isn't real.
+        missing = [
+            leg for leg in to_close
+            if (leg["exchange_segment"], str(leg["security_id"])) not in quotes
+        ]
+        if missing:
+            logger.warning(
+                "Skipping leg-exit on run %s — could not fetch a fresh exit quote for %s; will retry next poll.",
+                open_run.id, [leg["security_id"] for leg in missing],
+            )
+            return
+
         for leg_data in to_close:
-            quote = quotes.get((leg_data["exchange_segment"], str(leg_data["security_id"])))
-            if quote is not None:
-                exit_price = float(quote.get("last_price", leg_data["price"]))
-            else:
-                exit_price = leg_data["price"]
-                logger.warning(
-                    "Could not fetch fresh exit quote for %s; using last known price.", leg_data["security_id"]
-                )
+            quote = quotes[(leg_data["exchange_segment"], str(leg_data["security_id"]))]
+            exit_price = float(quote.get("last_price", leg_data["price"]))
 
             exit_leg = OrderLeg(
                 label=f"EXIT {leg_data['label']}",
@@ -511,7 +534,12 @@ def run_user_strategy(db: Session, user_strategy: UserStrategy) -> None:
 def close_user_strategy_now(db: Session, user_strategy: UserStrategy) -> bool:
     """Immediately close an open position for this strategy, outside the
     normal poll cycle — the "Close Now" button's action. Returns True if a
-    position was found and closed, False if there was nothing open."""
+    position was found and closed, False if there was nothing open.
+
+    Raises RuntimeError if a position was found but couldn't actually be
+    closed this attempt (a fresh quote wasn't available for every leg) —
+    distinct from "nothing to close", so the caller doesn't tell the user
+    their position closed when it's still open. Safe to click again."""
     open_run = find_open_run(user_strategy)
     if open_run is None:
         return False
@@ -525,7 +553,7 @@ def close_user_strategy_now(db: Session, user_strategy: UserStrategy) -> bool:
     except DhanNotConnectedError:
         raise
 
-    _close_open_run(
+    closed = _close_open_run(
         db,
         user_dhan.client,
         user.id,
@@ -534,6 +562,10 @@ def close_user_strategy_now(db: Session, user_strategy: UserStrategy) -> bool:
         reason="Manually closed by user.",
         is_manual=True,
     )
+    if not closed:
+        raise RuntimeError(
+            "Could not fetch a fresh market quote for every leg — nothing was closed. Please try again in a moment."
+        )
     return True
 
 

@@ -120,14 +120,40 @@ def test_close_user_strategy_now_also_saves_realized_pnl(db_session, monkeypatch
     assert run.closed_at is not None
 
 
-def test_close_open_run_falls_back_to_entry_price_without_a_fresh_quote(db_session):
-    """No quote for the leg -> exit priced at the stale entry price ->
-    zero P&L for that leg, not a crash and not a guessed number."""
+def test_close_open_run_skips_close_without_a_fresh_quote(db_session):
+    """No quote for the leg -> the whole close is skipped, not priced at
+    the stale entry price. A fabricated exit price is worse than no exit
+    at all — the run stays open, no order is placed, and the caller is
+    told (via the False return) so it can retry rather than assume the
+    position closed."""
     run = _make_open_run(db_session, sell_price=50.0)
     dhan = MagicMock()
     dhan.quote_data.return_value = {"status": "success", "data": {"status": "success", "data": {}}}
 
-    _close_open_run(db_session, dhan, run.user_strategy.user_id, run, is_live=False, reason="Exit conditions met.")
+    closed = _close_open_run(db_session, dhan, run.user_strategy.user_id, run, is_live=False, reason="Exit conditions met.")
+
+    assert closed is False
+    db_session.refresh(run)
+    assert run.status == "open"
+    assert run.closed_at is None
+    assert float(run.realized_pnl) == 0.0
+
+
+def test_close_user_strategy_now_raises_instead_of_lying_about_success(db_session, monkeypatch):
+    """If the quote fetch fails, close_user_strategy_now must not return
+    True (the flash message would tell the user their position closed when
+    it's actually still open) — it raises instead, which the router
+    surfaces as an error the user can retry."""
+    run = _make_open_run(db_session, sell_price=50.0)
+    dhan = MagicMock()
+    dhan.quote_data.return_value = {"status": "success", "data": {"status": "success", "data": {}}}
+    monkeypatch.setattr("app.engine.runner.get_user_dhan_client", lambda db, user: MagicMock(client=dhan))
+
+    try:
+        close_user_strategy_now(db_session, run.user_strategy)
+        assert False, "expected RuntimeError"
+    except RuntimeError:
+        pass
 
     db_session.refresh(run)
-    assert float(run.realized_pnl) == 0.0
+    assert run.status == "open"
