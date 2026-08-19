@@ -14,10 +14,25 @@ from typing import Any
 from app.dhan.helpers import fetch_quotes
 from app.engine.runner import find_open_run
 from app.models import UserStrategy
+from app.strategies.base import leg_pnl
 
 
 def compute_live_pnl(dhan_client: Any, user_strategies: list[UserStrategy]) -> list[dict]:
-    open_positions: list[tuple[UserStrategy, dict, list[dict], float]] = []
+    """Total live P&L per open position = realized P&L booked so far
+    (from rolls/per-leg exits that already happened this run — `run.
+    realized_pnl`) plus unrealized mark-to-market on whatever's still
+    open. This mirrors app.strategies.three_pair_rolling.evaluate_exit's
+    own daily-SL/target math exactly, on purpose: the dashboard number and
+    the number the engine actually trades on must never disagree.
+
+    Before this, a strategy's very first entry_premium (net credit at
+    entry) was compared against the current market value of *every* leg
+    the run had ever held — including legs a roll had already closed and
+    replaced. For a strategy with no rolls that was harmless (legs never
+    changes); for a rolling strategy it silently mixed dead history into
+    the live number, on top of never accounting for what a roll already
+    realized. Only still-open legs (per `leg_state`) are priced here now."""
+    open_positions: list[tuple[UserStrategy, list[dict], float, float]] = []
     security_ids_by_segment: dict[str, set[str]] = {}
 
     for us in user_strategies:
@@ -25,12 +40,19 @@ def compute_live_pnl(dhan_client: Any, user_strategies: list[UserStrategy]) -> l
         if run is None:
             continue
         legs_planned = run.legs_planned or {}
-        legs = legs_planned.get("legs") or []
+        all_legs = legs_planned.get("legs") or []
         entry_premium = legs_planned.get("entry_premium")
-        if not legs or entry_premium is None:
+        if not all_legs or entry_premium is None:
             continue
-        open_positions.append((us, run, legs, float(entry_premium)))
-        for leg in legs:
+
+        leg_state = legs_planned.get("leg_state") or {}
+        open_legs = [leg for leg in all_legs if (leg_state.get(str(leg["security_id"])) or {}).get("status") != "closed"]
+        if not open_legs:
+            continue  # every leg already closed via roll/per-leg exit; whole-position close will finish it off
+
+        realized_so_far = float(run.realized_pnl or 0)
+        open_positions.append((us, open_legs, float(entry_premium), realized_so_far))
+        for leg in open_legs:
             security_ids_by_segment.setdefault(leg["exchange_segment"], set()).add(str(leg["security_id"]))
 
     if not open_positions:
@@ -43,22 +65,27 @@ def compute_live_pnl(dhan_client: Any, user_strategies: list[UserStrategy]) -> l
     quotes = fetch_quotes(dhan_client, securities)
 
     results: list[dict] = []
-    for us, run, legs, entry_premium in open_positions:
-        current_value = 0.0
+    for us, open_legs, entry_premium, realized_so_far in open_positions:
+        unrealized = 0.0
         all_priced = True
-        for leg in legs:
-            quote = quotes.get((leg["exchange_segment"], str(leg["security_id"])))
-            if quote is None:
+        leg_prices: list[dict] = []
+        for leg in open_legs:
+            sid = str(leg["security_id"])
+            quote = quotes.get((leg["exchange_segment"], sid))
+            price = float(quote.get("last_price", 0)) if quote is not None else None
+            if price is None:
                 all_priced = False
-                continue
-            price = float(quote.get("last_price", 0))
-            sign = 1 if leg["transaction_type"] == "SELL" else -1
-            current_value += sign * price
+            else:
+                unrealized += leg_pnl(leg, price)
+            leg_prices.append({"security_id": sid, "current_price": price})
 
-        quantity = legs[0]["quantity"] if legs else 0
-        pnl_per_unit = (entry_premium - current_value) if all_priced else None
-        pnl_total = (pnl_per_unit * quantity) if pnl_per_unit is not None else None
-        pnl_pct = (pnl_per_unit / entry_premium * 100) if (pnl_per_unit is not None and entry_premium) else None
+        quantity = open_legs[0]["quantity"]
+        pnl_total = (realized_so_far + unrealized) if all_priced else None
+        # % is relative to the original premium collected at entry — an
+        # approximation once a roll has changed what's actually open, but
+        # still the only stable per-unit reference point the run has.
+        entry_total = entry_premium * quantity
+        pnl_pct = (pnl_total / abs(entry_total) * 100) if (pnl_total is not None and entry_total) else None
 
         results.append(
             {
@@ -66,11 +93,11 @@ def compute_live_pnl(dhan_client: Any, user_strategies: list[UserStrategy]) -> l
                 "strategy_name": us.strategy.name,
                 "mode": us.mode.value,
                 "entry_premium": entry_premium,
-                "current_value": current_value if all_priced else None,
                 "quantity": quantity,
                 "pnl_total": pnl_total,
                 "pnl_pct": pnl_pct,
                 "priced": all_priced,
+                "legs": leg_prices,
             }
         )
 

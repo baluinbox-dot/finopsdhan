@@ -108,25 +108,59 @@
     </table>
 </div>
 
-<h5 class="mb-3">Recent Orders</h5>
-<div class="table-responsive">
+<h5 class="mb-3">Running Orders</h5>
+<div class="table-responsive mb-4">
     <table class="table table-sm align-middle">
         <thead>
-            <tr><th>Time</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Price</th><th>Type</th><th>Status</th></tr>
+            <tr><th>Time</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Entry Price</th><th>Current Price</th><th>Live P&amp;L</th><th>Type</th></tr>
         </thead>
         <tbody>
-        {% for o in recent_orders %}
+        {% for row in running_rows %}
+            {% set o = row.order %}
             <tr>
                 <td class="small">{{ (o.placed_at | to_ist).strftime('%d %b, %H:%M') }} IST</td>
                 <td>{{ o.trading_symbol or o.security_id }}</td>
                 <td>{{ o.transaction_type }}</td>
                 <td>{{ o.quantity }}</td>
                 <td>{{ '%.2f'|format(o.price) }}</td>
+                <td data-price-cell="{{ row.user_strategy_id }}:{{ o.security_id }}"
+                    data-entry-price="{{ o.price }}" data-side="{{ o.transaction_type }}" data-qty="{{ o.quantity }}"
+                    class="text-body-secondary">pricing…</td>
+                <td data-pnl-cell="{{ row.user_strategy_id }}:{{ o.security_id }}" class="text-body-secondary">—</td>
                 <td>{% if o.is_paper %}<span class="badge text-bg-info">Paper</span>{% else %}<span class="badge text-bg-dark">Live</span>{% endif %}</td>
-                <td>{{ o.status.value }}</td>
             </tr>
         {% else %}
-            <tr><td colspan="7" class="text-body-secondary">No orders yet.</td></tr>
+            <tr><td colspan="8" class="text-body-secondary">No running orders.</td></tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<h5 class="mb-3">Closed Orders</h5>
+<div class="table-responsive">
+    <table class="table table-sm align-middle">
+        <thead>
+            <tr><th>Entry Time</th><th>Exit Time</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Entry Price</th><th>Exit Price</th><th>P&amp;L</th><th>Type</th></tr>
+        </thead>
+        <tbody>
+        {% for row in closed_rows %}
+            {% set entry = row.entry %}
+            {% set exit = row.exit %}
+            <tr>
+                <td class="small">{{ (entry.placed_at | to_ist).strftime('%d %b, %H:%M') }} IST</td>
+                <td class="small">{{ (exit.placed_at | to_ist).strftime('%d %b, %H:%M') }} IST</td>
+                <td>{{ entry.trading_symbol or entry.security_id }}</td>
+                <td>{{ entry.transaction_type }}</td>
+                <td>{{ entry.quantity }}</td>
+                <td>{{ '%.2f'|format(entry.price) }}</td>
+                <td>{{ '%.2f'|format(exit.price) }}</td>
+                <td class="{{ 'text-success' if row.pnl > 0 else ('text-danger' if row.pnl < 0 else 'text-body-secondary') }}">
+                    {{ '%+.2f'|format(row.pnl) }}
+                </td>
+                <td>{% if entry.is_paper %}<span class="badge text-bg-info">Paper</span>{% else %}<span class="badge text-bg-dark">Live</span>{% endif %}</td>
+            </tr>
+        {% else %}
+            <tr><td colspan="9" class="text-body-secondary">No closed orders yet.</td></tr>
         {% endfor %}
         </tbody>
     </table>
@@ -145,7 +179,7 @@
     </form>
 
     <div class="small text-body-secondary">
-        Showing {{ (page - 1) * per_page + 1 }} to {{ [page * per_page, total_orders] | min }} of {{ total_orders }} records
+        Showing {{ (page - 1) * per_page + 1 }} to {{ [page * per_page, total_orders] | min }} of {{ total_orders }} closed records
     </div>
 
     <nav>
@@ -164,7 +198,7 @@
 {% endblock %}
 
 {% block scripts %}
-{% if open_run_ids %}
+{% if open_run_ids or running_rows %}
 <script src="{{ url('/static/js/live_pnl.js') }}"></script>
 {% endif %}
 {% endblock %}

@@ -38,17 +38,47 @@
 
         positions.forEach((pos) => {
             const cell = document.querySelector(`[data-pnl-cell="${pos.user_strategy_id}"]`);
-            if (!cell) return;
-            if (pos.pnl_total === null || pos.pnl_total === undefined) {
-                cell.textContent = 'pricing…';
-                cell.classList.add('text-body-secondary');
-                return;
+            if (cell) {
+                if (pos.pnl_total === null || pos.pnl_total === undefined) {
+                    cell.textContent = 'pricing…';
+                    cell.classList.add('text-body-secondary');
+                } else {
+                    anyPriced = true;
+                    total += pos.pnl_total;
+                    const pctText = pos.pnl_pct !== null && pos.pnl_pct !== undefined ? ` (${pos.pnl_pct.toFixed(1)}%)` : '';
+                    cell.textContent = formatRupees(pos.pnl_total) + pctText;
+                    applyColor(cell, pos.pnl_total);
+                }
             }
-            anyPriced = true;
-            total += pos.pnl_total;
-            const pctText = pos.pnl_pct !== null && pos.pnl_pct !== undefined ? ` (${pos.pnl_pct.toFixed(1)}%)` : '';
-            cell.textContent = formatRupees(pos.pnl_total) + pctText;
-            applyColor(cell, pos.pnl_total);
+
+            // Per-leg current price + live P&L on the Dashboard's Running
+            // Orders table — keyed "{user_strategy_id}:{security_id}",
+            // distinct from the plain-UUID key above (whole-position
+            // aggregate), so the two never collide on the same attribute.
+            (pos.legs || []).forEach((leg) => {
+                const key = `${pos.user_strategy_id}:${leg.security_id}`;
+                const priceCell = document.querySelector(`[data-price-cell="${key}"]`);
+                if (!priceCell) return;
+
+                if (leg.current_price === null || leg.current_price === undefined) {
+                    priceCell.textContent = 'pricing…';
+                    return;
+                }
+                priceCell.textContent = leg.current_price.toFixed(2);
+                priceCell.classList.remove('text-body-secondary');
+
+                const entryPrice = parseFloat(priceCell.dataset.entryPrice);
+                const qty = parseFloat(priceCell.dataset.qty);
+                const pnlCell = document.querySelector(`[data-pnl-cell="${key}"]`);
+                if (pnlCell && !Number.isNaN(entryPrice) && !Number.isNaN(qty)) {
+                    const perUnit = priceCell.dataset.side === 'SELL'
+                        ? (entryPrice - leg.current_price)
+                        : (leg.current_price - entryPrice);
+                    const legPnl = perUnit * qty;
+                    pnlCell.textContent = formatRupees(legPnl);
+                    applyColor(pnlCell, legPnl);
+                }
+            });
         });
 
         const totalEl = document.getElementById('totalPnl');

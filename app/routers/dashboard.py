@@ -3,9 +3,11 @@ and safety controls (pause-all, kill switch)."""
 
 from __future__ import annotations
 
+from collections import defaultdict
+
 from fastapi import APIRouter, Request
 from fastapi.responses import RedirectResponse
-from sqlalchemy import func, select
+from sqlalchemy import select
 
 from app.dhan.client import DhanNotConnectedError, get_user_dhan_client
 from app.deps import CurrentUser, DbSession
@@ -23,6 +25,42 @@ ORDERS_PER_PAGE_CHOICES = (5, 10, 15, 20, 25, 50, 100)
 ORDERS_PER_PAGE_DEFAULT = 10
 
 
+def _pair_orders(orders: list[Order]) -> tuple[list[Order], list[tuple[Order, Order]]]:
+    """Split a user's orders into still-open legs and entry/exit pairs.
+
+    Every leg is opened by exactly one order and, once it closes, reversed
+    by exactly one more (see app/engine/runner.py — every close/roll/leg-
+    exit path always places the opposite-side order at the same
+    security_id). Grouping by (strategy_run_id, security_id) and pairing
+    consecutively by fill time recovers that structure directly from the
+    order history itself — no separate bookkeeping needed, and it holds
+    equally for a plain single-shot strategy, a rolled-away leg inside a
+    still-open run, and a fully-closed run."""
+    groups: dict[tuple[str, str], list[Order]] = defaultdict(list)
+    for o in orders:
+        run_key = str(o.strategy_run_id) if o.strategy_run_id else f"_norun_{o.id}"
+        groups[(run_key, o.security_id)].append(o)
+
+    running: list[Order] = []
+    closed: list[tuple[Order, Order]] = []
+    for group in groups.values():
+        group.sort(key=lambda o: o.placed_at)
+        for i in range(0, len(group) - 1, 2):
+            closed.append((group[i], group[i + 1]))
+        if len(group) % 2 == 1:
+            running.append(group[-1])
+
+    running.sort(key=lambda o: o.placed_at, reverse=True)
+    closed.sort(key=lambda pair: pair[1].placed_at, reverse=True)
+    return running, closed
+
+
+def _leg_pnl(entry: Order, exit_: Order) -> float:
+    if entry.transaction_type == "SELL":
+        return (float(entry.price) - float(exit_.price)) * entry.quantity
+    return (float(exit_.price) - float(entry.price)) * entry.quantity
+
+
 @router.get("")
 def dashboard(request: Request, db: DbSession, current_user: CurrentUser, page: int = 1, per_page: int = ORDERS_PER_PAGE_DEFAULT):
     user_strategies = db.scalars(
@@ -35,27 +73,37 @@ def dashboard(request: Request, db: DbSession, current_user: CurrentUser, page: 
         per_page = ORDERS_PER_PAGE_DEFAULT
     page = max(1, page)
 
-    total_orders = db.scalar(select(func.count()).select_from(Order).where(Order.user_id == current_user.id)) or 0
-    total_pages = max(1, -(-total_orders // per_page))  # ceil division
-    page = min(page, total_pages)
-
-    recent_orders = db.scalars(
-        select(Order)
-        .where(Order.user_id == current_user.id)
-        .order_by(Order.placed_at.desc())
-        .offset((page - 1) * per_page)
-        .limit(per_page)
+    # Pairing needs every order (an entry can be arbitrarily far behind its
+    # exit), so this loads the user's full order history rather than one
+    # page at a time — fine at this app's per-tenant order volume; revisit
+    # with a real SQL pairing query if that ever stops being true.
+    all_orders = db.scalars(
+        select(Order).where(Order.user_id == current_user.id).order_by(Order.placed_at.asc())
     ).all()
+    running_orders, closed_pairs = _pair_orders(all_orders)
+
+    total_closed = len(closed_pairs)
+    total_pages = max(1, -(-total_closed // per_page))  # ceil division
+    page = min(page, total_pages)
+    paged_closed = closed_pairs[(page - 1) * per_page : (page - 1) * per_page + per_page]
+    closed_rows = [
+        {"entry": entry, "exit": exit_, "pnl": _leg_pnl(entry, exit_)} for entry, exit_ in paged_closed
+    ]
+
+    # Each running leg needs its owning strategy instance so the dashboard
+    # JS can match it to the live-quote poll's per-leg price (keyed
+    # "{user_strategy_id}:{security_id}" — see live_pnl.js).
+    running_rows = [
+        {"order": o, "user_strategy_id": str(o.strategy_run.user_strategy_id) if o.strategy_run else None}
+        for o in running_orders
+    ]
 
     # The two stat-card counts ("Paper Orders (recent)" / "Live Orders
     # (recent)") intentionally still summarize a fixed recent window, not
     # the current page — they're headline counts, not tied to whichever
-    # page/page-size the Recent Orders table happens to be showing.
-    recent_for_counts = db.scalars(
-        select(Order).where(Order.user_id == current_user.id).order_by(Order.placed_at.desc()).limit(25)
-    ).all()
-    paper_count = sum(1 for o in recent_for_counts if o.is_paper)
-    live_count = sum(1 for o in recent_for_counts if not o.is_paper)
+    # page/page-size the Closed Orders table happens to be showing.
+    paper_count = sum(1 for o in all_orders[-25:] if o.is_paper)
+    live_count = sum(1 for o in all_orders[-25:] if not o.is_paper)
 
     return render(
         request,
@@ -65,14 +113,15 @@ def dashboard(request: Request, db: DbSession, current_user: CurrentUser, page: 
             "user_strategies": user_strategies,
             "active_count": active_count,
             "open_run_ids": open_run_ids,
-            "recent_orders": recent_orders,
+            "running_rows": running_rows,
+            "closed_rows": closed_rows,
             "paper_count": paper_count,
             "live_count": live_count,
             "has_dhan": current_user.dhan_credential is not None and current_user.dhan_credential.is_active,
             "page": page,
             "per_page": per_page,
             "per_page_choices": ORDERS_PER_PAGE_CHOICES,
-            "total_orders": total_orders,
+            "total_orders": total_closed,
             "total_pages": total_pages,
         },
     )
