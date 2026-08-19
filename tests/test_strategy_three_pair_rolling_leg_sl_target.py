@@ -118,6 +118,95 @@ def test_entry_blocked_after_one_entry_today():
         assert strategy.evaluate_entry(ctx) is None
 
 
+# --- entry: hedge (same mechanics as the original strategy) ---
+
+
+def test_entry_with_hedge_adds_one_ce_and_one_pe_sized_for_all_three_pairs():
+    dhan = _mock_dhan_client(spot=24400.0)
+    ctx = StrategyContext(
+        dhan_client=dhan,
+        params={"expiry": "2026-08-27", "strike_gap": 50, "lots": 1, "hedge_enabled": True, "hedge_premium_target": 5},
+        today_run_count=0,
+    )
+    strategy = ThreePairRollingLegSLTargetStrategy()
+
+    with _patched_now(_within_window_time()):
+        legs = strategy.evaluate_entry(ctx)
+
+    assert legs is not None
+    assert len(legs) == 8  # 3 pairs x (CE+PE) + 1 CE hedge + 1 PE hedge
+
+    primary = [leg for leg in legs if leg.role == "primary"]
+    hedges = [leg for leg in legs if leg.role == "hedge"]
+    assert len(primary) == 6
+    assert len(hedges) == 2
+    assert {leg.transaction_type for leg in hedges} == {"BUY"}
+    assert {leg.trading_symbol.split()[2] for leg in hedges} == {"CE", "PE"}
+
+    for leg in hedges:
+        assert leg.quantity == 75 * 1 * 3  # 1 lot/pair x 3 pairs
+    for leg in primary:
+        assert leg.quantity == 75 * 1
+
+
+def test_entry_with_hedge_scales_3x_with_lots_per_pair():
+    dhan = _mock_dhan_client(spot=24400.0)
+    ctx = StrategyContext(
+        dhan_client=dhan,
+        params={"expiry": "2026-08-27", "strike_gap": 50, "lots": 2, "hedge_enabled": True, "hedge_premium_target": 5},
+        today_run_count=0,
+    )
+    strategy = ThreePairRollingLegSLTargetStrategy()
+
+    with _patched_now(_within_window_time()):
+        legs = strategy.evaluate_entry(ctx)
+
+    assert legs is not None
+    hedges = [leg for leg in legs if leg.role == "hedge"]
+    primary = [leg for leg in legs if leg.role == "primary"]
+    for leg in hedges:
+        assert leg.quantity == 75 * 2 * 3
+    for leg in primary:
+        assert leg.quantity == 75 * 2
+
+
+def test_entry_hedge_disabled_by_default_adds_no_hedge_legs():
+    dhan = _mock_dhan_client(spot=24400.0)
+    ctx = StrategyContext(dhan_client=dhan, params={"expiry": "2026-08-27", "strike_gap": 50, "lots": 1}, today_run_count=0)
+    strategy = ThreePairRollingLegSLTargetStrategy()
+
+    with _patched_now(_within_window_time()):
+        legs = strategy.evaluate_entry(ctx)
+
+    assert legs is not None
+    assert len(legs) == 6
+    assert all(leg.role == "primary" for leg in legs)
+
+
+def test_hedge_legs_are_immune_to_per_leg_sl_target():
+    """A hedge is a BUY, not a SELL — the per-leg SL/target math (built for
+    the SELL sign convention) must never even look at it. Hedge legs only
+    ever close via the whole-run close path."""
+    strategy = ThreePairRollingLegSLTargetStrategy()
+    dhan = MagicMock()
+    # Wildly move the hedge's own quote — if evaluate_leg_exits touched it
+    # at all, this would misfire or raise on the SELL-only math.
+    dhan.quote_data.return_value = _quote_response({_ce_id(24200): 1.0, _pe_id(24600): 1.0})
+    notes = _window_notes()
+    notes["legs"] = notes["legs"] + [
+        {"label": "HEDGE BUY 24200 CE", "security_id": _ce_id(24200), "trading_symbol": "NIFTY 24200 CE 2026-08-27",
+         "exchange_segment": "NSE_FNO", "transaction_type": "BUY", "quantity": 225, "order_type": "LIMIT",
+         "product_type": "INTRADAY", "price": 5.0, "role": "hedge"},
+        {"label": "HEDGE BUY 24600 PE", "security_id": _pe_id(24600), "trading_symbol": "NIFTY 24600 PE 2026-08-27",
+         "exchange_segment": "NSE_FNO", "transaction_type": "BUY", "quantity": 225, "order_type": "LIMIT",
+         "product_type": "INTRADAY", "price": 5.0, "role": "hedge"},
+    ]
+    ctx = StrategyContext(dhan_client=dhan, params={"leg_stop_loss_pct": 25, "leg_target_pct": 80})
+
+    decision = strategy.evaluate_leg_exits(ctx, notes)
+    assert decision is None  # nothing hit SL/target among the primary legs, and hedge was never considered
+
+
 # --- helpers for leg-exit / roll tests ---
 
 

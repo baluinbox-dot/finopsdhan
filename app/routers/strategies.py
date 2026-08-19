@@ -1041,6 +1041,8 @@ def configure_rolling_legsl_submit(
     leg_target_pct: float = Form(80),
     daily_stop_loss: float = Form(10000),
     daily_target: float = Form(15000),
+    hedge_enabled: bool = Form(False),
+    hedge_premium_target: float = Form(5),
     mode: str = Form("paper"),
 ):
     strategy = db.get(Strategy, strategy_id)
@@ -1109,6 +1111,8 @@ def configure_rolling_legsl_submit(
         "leg_target_pct": leg_target_pct,
         "daily_stop_loss": daily_stop_loss,
         "daily_target": daily_target,
+        "hedge_enabled": hedge_enabled,
+        "hedge_premium_target": hedge_premium_target,
     }
 
     existing: UserStrategy | None = None
