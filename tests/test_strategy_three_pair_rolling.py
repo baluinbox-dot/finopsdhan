@@ -89,6 +89,36 @@ def test_entry_creates_a_t_m_b_window_at_atm_plus_minus_gap():
     assert len(legs) == 6  # B/M/T x (CE + PE)
     assert {leg.transaction_type for leg in legs} == {"SELL"}
 
+
+def test_entry_tags_legs_with_the_underlyings_own_derivative_segment():
+    """Regression: every leg's exchange_segment must come from the traded
+    underlying, not a hardcoded NSE_FNO — SENSEX options trade on BSE_FNO,
+    not NSE_FNO. Mistagging this makes live-P&L quote lookups and the
+    daily stop-loss/target check silently fail forever for that position
+    (both key legs by exchange_segment), even though it looks "Active"."""
+    dhan = _mock_dhan_client(spot=24400.0)
+    ctx = StrategyContext(
+        dhan_client=dhan,
+        params={"underlying": "SENSEX", "expiry": "2026-08-27", "strike_gap": 50},
+        today_run_count=0,
+    )
+    strategy = ThreePairRollingStrategy()
+
+    with patch("app.strategies.three_pair_rolling._now_ist", return_value=_within_window_time()):
+        legs = strategy.evaluate_entry(ctx)
+
+    assert legs is not None
+    assert {leg.exchange_segment for leg in legs} == {"BSE_FNO"}
+
+    # NIFTY (and the other NSE indices) must still get NSE_FNO.
+    dhan_nifty = _mock_dhan_client(spot=24400.0)
+    ctx_nifty = StrategyContext(
+        dhan_client=dhan_nifty, params={"expiry": "2026-08-27", "strike_gap": 50}, today_run_count=0
+    )
+    with patch("app.strategies.three_pair_rolling._now_ist", return_value=_within_window_time()):
+        nifty_legs = strategy.evaluate_entry(ctx_nifty)
+    assert {leg.exchange_segment for leg in nifty_legs} == {"NSE_FNO"}
+
     def strike_of(leg):
         return int(leg.trading_symbol.split()[1])
 
