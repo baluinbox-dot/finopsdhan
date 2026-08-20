@@ -108,11 +108,24 @@
     </table>
 </div>
 
-<h5 class="mb-3">Running Orders</h5>
+<div class="d-flex flex-wrap justify-content-between align-items-center mb-3 gap-2">
+    <h5 class="mb-0">Running Orders</h5>
+    <form method="get" action="{{ url('/dashboard') }}" class="d-flex align-items-center gap-2">
+        <label for="strategyFilter" class="small text-body-secondary mb-0">Strategy</label>
+        <select id="strategyFilter" name="strategy_id" class="form-select form-select-sm w-auto" onchange="this.form.submit()">
+            <option value="" {{ 'selected' if not strategy_id else '' }}>All Strategies</option>
+            {% for us in user_strategies %}
+            <option value="{{ us.id }}" {{ 'selected' if strategy_id == us.id | string else '' }}>{{ us.label or us.strategy.name }}</option>
+            {% endfor %}
+        </select>
+        <input type="hidden" name="running_per_page" value="{{ running_per_page }}">
+        <input type="hidden" name="per_page" value="{{ per_page }}">
+    </form>
+</div>
 <div class="table-responsive mb-4">
     <table class="table table-sm align-middle">
         <thead>
-            <tr><th>Time</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Entry Price</th><th>Current Price</th><th>Live P&amp;L</th><th>Type</th></tr>
+            <tr><th>Time</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Entry Price</th><th>Current Price</th><th>% Change</th><th>Live P&amp;L</th><th>Type</th></tr>
         </thead>
         <tbody>
         {% for row in running_rows %}
@@ -126,11 +139,12 @@
                 <td data-price-cell="{{ row.user_strategy_id }}:{{ o.security_id }}"
                     data-entry-price="{{ o.price }}" data-side="{{ o.transaction_type }}" data-qty="{{ o.quantity }}"
                     class="text-body-secondary">pricing…</td>
+                <td data-pct-cell="{{ row.user_strategy_id }}:{{ o.security_id }}" class="text-body-secondary">—</td>
                 <td data-pnl-cell="{{ row.user_strategy_id }}:{{ o.security_id }}" class="text-body-secondary">—</td>
                 <td>{% if o.is_paper %}<span class="badge text-bg-info">Paper</span>{% else %}<span class="badge text-bg-dark">Live</span>{% endif %}</td>
             </tr>
         {% else %}
-            <tr><td colspan="8" class="text-body-secondary">No running orders.</td></tr>
+            <tr><td colspan="9" class="text-body-secondary">No running orders.</td></tr>
         {% endfor %}
         </tbody>
     </table>
@@ -148,6 +162,7 @@
         <input type="hidden" name="running_page" value="1">
         <input type="hidden" name="page" value="{{ page }}">
         <input type="hidden" name="per_page" value="{{ per_page }}">
+        <input type="hidden" name="strategy_id" value="{{ strategy_id }}">
     </form>
 
     <div class="small text-body-secondary">
@@ -157,18 +172,18 @@
     <nav>
         <ul class="pagination pagination-sm mb-0">
             <li class="page-item {{ 'disabled' if running_page <= 1 else '' }}">
-                <a class="page-link" href="{{ url('/dashboard') }}?running_page={{ running_page - 1 }}&running_per_page={{ running_per_page }}&page={{ page }}&per_page={{ per_page }}">Previous</a>
+                <a class="page-link" href="{{ url('/dashboard') }}?running_page={{ running_page - 1 }}&running_per_page={{ running_per_page }}&page={{ page }}&per_page={{ per_page }}&strategy_id={{ strategy_id }}">Previous</a>
             </li>
             <li class="page-item disabled"><span class="page-link">Page {{ running_page }} of {{ total_running_pages }}</span></li>
             <li class="page-item {{ 'disabled' if running_page >= total_running_pages else '' }}">
-                <a class="page-link" href="{{ url('/dashboard') }}?running_page={{ running_page + 1 }}&running_per_page={{ running_per_page }}&page={{ page }}&per_page={{ per_page }}">Next</a>
+                <a class="page-link" href="{{ url('/dashboard') }}?running_page={{ running_page + 1 }}&running_per_page={{ running_per_page }}&page={{ page }}&per_page={{ per_page }}&strategy_id={{ strategy_id }}">Next</a>
             </li>
         </ul>
     </nav>
 </div>
 {% endif %}
 
-<h5 class="mb-3">Closed Orders</h5>
+<h5 class="mb-3">Closed Orders <span class="fs-6 fw-normal text-body-secondary">(Today)</span></h5>
 <div class="table-responsive">
     <table class="table table-sm align-middle">
         <thead>
@@ -192,7 +207,7 @@
                 <td>{% if entry.is_paper %}<span class="badge text-bg-info">Paper</span>{% else %}<span class="badge text-bg-dark">Live</span>{% endif %}</td>
             </tr>
         {% else %}
-            <tr><td colspan="9" class="text-body-secondary">No closed orders yet.</td></tr>
+            <tr><td colspan="9" class="text-body-secondary">No closed orders today.</td></tr>
         {% endfor %}
         </tbody>
     </table>
@@ -210,6 +225,7 @@
         <input type="hidden" name="page" value="1">
         <input type="hidden" name="running_page" value="{{ running_page }}">
         <input type="hidden" name="running_per_page" value="{{ running_per_page }}">
+        <input type="hidden" name="strategy_id" value="{{ strategy_id }}">
     </form>
 
     <div class="small text-body-secondary">
@@ -219,11 +235,11 @@
     <nav>
         <ul class="pagination pagination-sm mb-0">
             <li class="page-item {{ 'disabled' if page <= 1 else '' }}">
-                <a class="page-link" href="{{ url('/dashboard') }}?page={{ page - 1 }}&per_page={{ per_page }}&running_page={{ running_page }}&running_per_page={{ running_per_page }}">Previous</a>
+                <a class="page-link" href="{{ url('/dashboard') }}?page={{ page - 1 }}&per_page={{ per_page }}&running_page={{ running_page }}&running_per_page={{ running_per_page }}&strategy_id={{ strategy_id }}">Previous</a>
             </li>
             <li class="page-item disabled"><span class="page-link">Page {{ page }} of {{ total_pages }}</span></li>
             <li class="page-item {{ 'disabled' if page >= total_pages else '' }}">
-                <a class="page-link" href="{{ url('/dashboard') }}?page={{ page + 1 }}&per_page={{ per_page }}&running_page={{ running_page }}&running_per_page={{ running_per_page }}">Next</a>
+                <a class="page-link" href="{{ url('/dashboard') }}?page={{ page + 1 }}&per_page={{ per_page }}&running_page={{ running_page }}&running_per_page={{ running_per_page }}&strategy_id={{ strategy_id }}">Next</a>
             </li>
         </ul>
     </nav>

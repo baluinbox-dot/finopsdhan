@@ -134,7 +134,7 @@ def test_dashboard_no_orders_hides_pagination(client, db_session):
     _register_and_login(client, db_session, "trader@example.com")
     resp = client.get("/dashboard")
     assert resp.status_code == 200
-    assert "No closed orders yet." in resp.text
+    assert "No closed orders today." in resp.text
     assert "Showing" not in resp.text
 
 
@@ -220,3 +220,70 @@ def test_dashboard_running_and_closed_pagination_are_independent(client, db_sess
     assert resp.status_code == 200
     assert "Showing 11 to 15 of 15 closed records" in resp.text
     assert "Showing 1 to 3 of 3 running records" in resp.text  # running still on its own page 1
+
+
+def test_dashboard_closed_orders_only_shows_today(client, db_session):
+    """Closed Orders is a same-day quick-reference — a pair that closed on
+    an earlier calendar day (IST) must not appear, even though it's still
+    in the order history the Reports page would show."""
+    user = _register_and_login(client, db_session, "trader@example.com")
+    _make_orders(db_session, user, 1)  # closes "now" == today
+
+    strategy = Strategy(name="Yesterday Strategy", code_ref="x", is_published=True)
+    db_session.add(strategy)
+    db_session.flush()
+    user_strategy = UserStrategy(user_id=user.id, strategy_id=strategy.id, mode=StrategyMode.PAPER)
+    db_session.add(user_strategy)
+    db_session.flush()
+    run = StrategyRun(user_strategy_id=user_strategy.id, status="closed", legs_planned={})
+    db_session.add(run)
+    db_session.flush()
+    yesterday = datetime.now(timezone.utc) - timedelta(days=1)
+    db_session.add_all([
+        Order(
+            user_id=user.id, strategy_run_id=run.id, security_id="7000", trading_symbol="NIFTY 24700 CE",
+            transaction_type="SELL", quantity=75, order_type="LIMIT", product_type="INTRADAY",
+            price=120.0, status=OrderStatus.PAPER_FILLED, is_paper=True, placed_at=yesterday - timedelta(minutes=1),
+        ),
+        Order(
+            user_id=user.id, strategy_run_id=run.id, security_id="7000", trading_symbol="NIFTY 24700 CE",
+            transaction_type="BUY", quantity=75, order_type="LIMIT", product_type="INTRADAY",
+            price=100.0, status=OrderStatus.PAPER_FILLED, is_paper=True, placed_at=yesterday,
+        ),
+    ])
+    db_session.commit()
+
+    resp = client.get("/dashboard")
+    assert resp.status_code == 200
+    assert "NIFTY 24000 CE" in resp.text  # today's pair from _make_orders
+    assert "NIFTY 24700 CE" not in resp.text  # yesterday's pair, filtered out
+    assert "Showing 1 to 1 of 1 closed records" in resp.text
+
+
+def test_dashboard_strategy_filter_narrows_running_and_closed(client, db_session):
+    """The Strategy dropdown scopes both Running and Closed Orders to just
+    that one UserStrategy instance's orders."""
+    user = _register_and_login(client, db_session, "trader@example.com")
+    _make_orders(db_session, user, 1)  # a closed pair under "Test Strategy"
+    _make_running_orders(db_session, user, 1)  # a running leg under "Test Strategy 0"
+
+    other_strategy = Strategy(name="Other Strategy", code_ref="x", is_published=True)
+    db_session.add(other_strategy)
+    db_session.flush()
+    other_user_strategy = UserStrategy(user_id=user.id, strategy_id=other_strategy.id, mode=StrategyMode.PAPER)
+    db_session.add(other_user_strategy)
+    db_session.flush()
+
+    # Filtering to the *other* strategy (no orders of its own) must hide
+    # both the closed pair and the running leg from the other instances.
+    resp = client.get(f"/dashboard?strategy_id={other_user_strategy.id}")
+    assert resp.status_code == 200
+    assert "NIFTY 24000 CE" not in resp.text  # the closed pair, filtered out
+    assert "NIFTY 25000 PE" not in resp.text  # the running leg, filtered out
+    assert "No running orders." in resp.text
+    assert "No closed orders today." in resp.text
+
+    # No filter (or filtering to its own strategy) still shows everything.
+    resp_all = client.get("/dashboard")
+    assert "NIFTY 24000 CE" in resp_all.text
+    assert "NIFTY 25000 PE" in resp_all.text

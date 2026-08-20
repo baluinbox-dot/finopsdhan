@@ -60,8 +60,11 @@
                 const priceCell = document.querySelector(`[data-price-cell="${key}"]`);
                 if (!priceCell) return;
 
+                const pctCell = document.querySelector(`[data-pct-cell="${key}"]`);
+
                 if (leg.current_price === null || leg.current_price === undefined) {
                     priceCell.textContent = 'pricing…';
+                    if (pctCell) pctCell.textContent = '—';
                     return;
                 }
                 priceCell.textContent = leg.current_price.toFixed(2);
@@ -69,6 +72,17 @@
 
                 const entryPrice = parseFloat(priceCell.dataset.entryPrice);
                 const qty = parseFloat(priceCell.dataset.qty);
+
+                // Plain premium move (current vs entry), not P&L-adjusted for
+                // side — "how far has the price itself moved", the number a
+                // SL/target percentage is actually measured against.
+                if (pctCell && !Number.isNaN(entryPrice) && entryPrice !== 0) {
+                    const pct = ((leg.current_price - entryPrice) / entryPrice) * 100;
+                    pctCell.textContent = (pct >= 0 ? '+' : '') + pct.toFixed(1) + '%';
+                    pctCell.classList.remove('text-body-secondary', 'text-success', 'text-danger');
+                    pctCell.classList.add(pct > 0 ? 'text-success' : pct < 0 ? 'text-danger' : 'text-body-secondary');
+                }
+
                 const pnlCell = document.querySelector(`[data-pnl-cell="${key}"]`);
                 if (pnlCell && !Number.isNaN(entryPrice) && !Number.isNaN(qty)) {
                     const perUnit = priceCell.dataset.side === 'SELL'
