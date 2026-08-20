@@ -249,6 +249,6 @@
 
 {% block scripts %}
 {% if open_run_ids or running_rows %}
-<script src="{{ url('/static/js/live_pnl.js') }}"></script>
+<script src="{{ static_url('js/live_pnl.js') }}"></script>
 {% endif %}
 {% endblock %}

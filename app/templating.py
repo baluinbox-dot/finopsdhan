@@ -13,6 +13,7 @@ from fastapi.templating import Jinja2Templates
 from app.config import get_settings
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
+STATIC_DIR = Path(__file__).parent / "static"
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -29,6 +30,35 @@ def url(path: str) -> str:
 
 
 templates.env.globals["url"] = url
+
+_static_version_cache: dict[str, str] = {}
+
+
+def static_url(path: str) -> str:
+    """URL for a /static asset (path relative to app/static, e.g.
+    "js/live_pnl.js") with a cache-busting ?v=<mtime> query string.
+
+    The StaticFiles mount serves these with Last-Modified/ETag but no
+    explicit Cache-Control — with no Cache-Control, browsers apply their
+    own heuristic freshness and can serve a JS/CSS file straight from disk
+    cache on a plain reload without even asking the server, so a deploy
+    that changes behavior (not just markup) can silently keep running old
+    code after the page has visibly reloaded with new HTML. Confirmed live:
+    a Dashboard reload after deploying the % Change column showed the new
+    <th> and cell but the old live_pnl.js never populated it. The query
+    string forces a new URL — and therefore an uncached fetch — every time
+    the file's content actually changes; mtime is cached per path for this
+    process's lifetime since the file won't change while it's running."""
+    if path not in _static_version_cache:
+        try:
+            mtime = int((STATIC_DIR / path).stat().st_mtime)
+        except OSError:
+            mtime = 0
+        _static_version_cache[path] = str(mtime)
+    return f"{url('/static/' + path)}?v={_static_version_cache[path]}"
+
+
+templates.env.globals["static_url"] = static_url
 
 
 def to_ist(dt: datetime | None) -> datetime | None:
