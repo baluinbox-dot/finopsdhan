@@ -4,6 +4,7 @@ and safety controls (pause-all, kill switch)."""
 from __future__ import annotations
 
 from collections import defaultdict
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Request
 from fastapi.responses import RedirectResponse
@@ -14,7 +15,7 @@ from app.deps import CurrentUser, DbSession
 from app.engine.pnl import compute_live_pnl
 from app.engine.runner import find_open_run
 from app.models import Order, UserStrategy
-from app.templating import flash, render, url
+from app.templating import IST, flash, render, to_ist, url
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 
@@ -80,6 +81,7 @@ def dashboard(
     per_page: int = ORDERS_PER_PAGE_DEFAULT,
     running_page: int = 1,
     running_per_page: int = ORDERS_PER_PAGE_DEFAULT,
+    strategy_id: str = "",
 ):
     user_strategies = db.scalars(
         select(UserStrategy).where(UserStrategy.user_id == current_user.id)
@@ -94,7 +96,25 @@ def dashboard(
     all_orders = db.scalars(
         select(Order).where(Order.user_id == current_user.id).order_by(Order.placed_at.asc())
     ).all()
-    running_orders, closed_pairs = _pair_orders(all_orders)
+
+    # Strategy filter (Running/Closed tables only — the stat cards and "My
+    # Strategies" table above always show everything regardless). An order
+    # with no strategy_run (shouldn't normally happen, but Order.strategy_run_id
+    # is nullable) never matches a specific filter — only "All Strategies".
+    filtered_orders = all_orders
+    if strategy_id:
+        filtered_orders = [
+            o for o in all_orders
+            if o.strategy_run is not None and str(o.strategy_run.user_strategy_id) == strategy_id
+        ]
+
+    running_orders, closed_pairs = _pair_orders(filtered_orders)
+
+    # Closed Orders is a same-day quick-reference, not a history browser —
+    # full trade history already lives on the Reports page. Keyed off the
+    # exit leg's IST calendar date, matching _to_ist_date in app/routers/reports.py.
+    today_ist = datetime.now(timezone.utc).astimezone(IST).date()
+    closed_pairs = [pair for pair in closed_pairs if to_ist(pair[1].placed_at).date() == today_ist]
 
     paged_closed, page, per_page, total_pages = _paginate(closed_pairs, page, per_page)
     closed_rows = [
@@ -141,6 +161,7 @@ def dashboard(
             "running_per_page": running_per_page,
             "total_running_orders": len(running_orders),
             "total_running_pages": total_running_pages,
+            "strategy_id": strategy_id,
         },
     )
 
