@@ -36,6 +36,27 @@ _option_chain_lock = threading.Lock()
 _option_chain_last_call_at: float = 0.0
 _OPTION_CHAIN_MIN_INTERVAL_SECONDS = 3.0
 
+# Dhan's quote/ticker data ("market quote") family is rate-limited to one
+# request/sec, account-wide — see fetch_quotes below. Unlike option_chain
+# above, this had no throttle at all until 2026-08-20, and it showed: once
+# the scheduler started evaluating a user's active strategies concurrently
+# (a small thread pool, added 2026-08-19 for latency), two or more
+# instances' quote_data/ticker_data calls routinely landed in the same
+# second and Dhan rate-limited them — confirmed live via the VM's journalctl
+# showing thousands of quote_data failures with the empty-remarks signature
+# format_dhan_error() below already recognizes as "you're being
+# rate-limited". Because every exit path (evaluate_leg_exits, evaluate_exit,
+# evaluate_rolls, close_user_strategy_now) refuses to fabricate a price when
+# the quote fetch fails, this silently stalled every SL/target/roll/close
+# check for as long as the rate-limiting persisted — in the incident that
+# surfaced this, that was continuously, all session. Serialize every
+# quote_data/ticker_data call in this process the same way option_chain
+# calls already are, so this can't recur regardless of how many strategies
+# are active at once.
+_quote_lock = threading.Lock()
+_quote_last_call_at: float = 0.0
+_QUOTE_MIN_INTERVAL_SECONDS = 1.0
+
 
 def _call_with_retry(fn: Callable[[], Any], *, attempts: int = 2, base_delay: float = 1.0) -> Any:
     """Retry a read-only Dhan call once on a transient failure (timeout,
@@ -63,6 +84,15 @@ def _throttle_option_chain() -> None:
         if wait > 0:
             time.sleep(wait)
         _option_chain_last_call_at = time.monotonic()
+
+
+def _throttle_quote() -> None:
+    global _quote_last_call_at
+    with _quote_lock:
+        wait = _QUOTE_MIN_INTERVAL_SECONDS - (time.monotonic() - _quote_last_call_at)
+        if wait > 0:
+            time.sleep(wait)
+        _quote_last_call_at = time.monotonic()
 
 # Index underlyings quick-reference (from the dhanhq-skills SKILL.md).
 # security_id is fixed by Dhan; exchange_segment is always the index segment
@@ -132,11 +162,14 @@ def fetch_quotes(dhan_client: "dhanhq", securities: dict[str, list[Any]]) -> dic
 
     `securities` is Dhan's own request shape, e.g. {"NSE_FNO": [45106, 45093]}
     — group everything you need into as few segments as possible in one call;
-    Dhan's quote API is rate-limited to 1 request/sec for the whole account.
+    Dhan's quote API is rate-limited to 1 request/sec for the whole account,
+    enforced here via `_throttle_quote` regardless of how many strategies
+    are calling this concurrently (see the comment above `_quote_lock`).
     A failed call or a missing security in the response is simply absent
     from the returned dict — callers should treat a missing key as "no
     fresh quote available," not raise.
     """
+    _throttle_quote()
     try:
         response = _call_with_retry(lambda: dhan_client.quote_data(securities))
     except Exception as exc:  # noqa: BLE001
@@ -174,6 +207,7 @@ def fetch_spot_price(dhan_client: "dhanhq", exchange_segment: str, security_id: 
     """Fetch the current last-traded price for an index/underlying via
     ticker_data. Returns None (never raises) if the quote isn't available
     this call — callers should skip evaluation this pass, not guess."""
+    _throttle_quote()
     try:
         response = _call_with_retry(lambda: dhan_client.ticker_data({exchange_segment: [security_id]}))
     except Exception:  # noqa: BLE001
