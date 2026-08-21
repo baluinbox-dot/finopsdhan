@@ -270,7 +270,9 @@ def resend_verification_submit(request: Request, db: DbSession, email: str = For
 def login_form(request: Request, current_user: CurrentUserOptional):
     if current_user:
         return RedirectResponse(url("/dashboard"), status_code=303)
-    return render(request, "auth/login.html", _new_captcha(request))
+    context = _new_captcha(request)
+    context["dhan_referral_url"] = get_settings().dhan_referral_url
+    return render(request, "auth/login.html", context)
 
 
 @router.post("/login")

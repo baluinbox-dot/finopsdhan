@@ -1,0 +1,11 @@
+{# Shared Dhan referral banner — included on the login and register pages
+   (the app's two logged-out entry points; "/" itself just redirects to one
+   of them). Purely informational: we have no way to verify the referral
+   link was actually used, so this is a prompt, not an enforced gate. #}
+<div class="alert alert-info small">
+    <i class="bi bi-info-circle"></i>
+    This app trades through your own Dhan broker account. If you don't have one yet, open a free Demat account
+    using our link — fast order execution, powerful charts, ₹1 crore MTF funding, 2,500 price alerts, instant
+    pledge margin benefit, ₹0 AMC for life, zero brokerage on investing, ₹20/order for trading:
+    <a href="{{ dhan_referral_url }}" target="_blank" rel="noopener noreferrer">{{ dhan_referral_url }}</a>
+</div>
