@@ -12,6 +12,7 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from app.config import get_settings
 from app.deps import CurrentUserOptional
+from app.dhan import diagnostics as dhan_diagnostics
 from app.engine.scheduler import start_scheduler, stop_scheduler
 from app.routers import admin, auth, dashboard, reports, settings as settings_router, strategies
 from app.seed import seed_demo_strategy
@@ -22,6 +23,7 @@ settings = get_settings()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    dhan_diagnostics.install()
     seed_demo_strategy()
     start_scheduler()
     yield
