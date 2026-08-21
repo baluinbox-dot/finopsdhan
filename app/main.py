@@ -28,7 +28,7 @@ async def lifespan(app: FastAPI):
     stop_scheduler()
 
 
-app = FastAPI(title="FinOps Dhan Algo", lifespan=lifespan)
+app = FastAPI(title="FinOps Algo", lifespan=lifespan)
 
 app.add_middleware(
     SessionMiddleware,
@@ -78,8 +78,8 @@ def healthz():
 @app.get(url("/manifest.json"))
 def pwa_manifest():
     manifest = {
-        "name": "FinOps Dhan Algo",
-        "short_name": "Dhan Algo",
+        "name": "FinOps Algo",
+        "short_name": "FinOps Algo",
         "description": "Multi-tenant algo-trading dashboard connected to your own Dhan broker account.",
         "start_url": url("/"),
         "scope": url("/"),

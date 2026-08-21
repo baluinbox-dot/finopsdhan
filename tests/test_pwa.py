@@ -10,7 +10,7 @@ def test_manifest_json_served_with_correct_media_type_and_icons(client):
     assert resp.headers["content-type"].startswith("application/manifest+json")
 
     body = resp.json()
-    assert body["name"] == "FinOps Dhan Algo"
+    assert body["name"] == "FinOps Algo"
     assert body["start_url"] == "/"
     assert body["scope"] == "/"
     assert body["display"] == "standalone"
