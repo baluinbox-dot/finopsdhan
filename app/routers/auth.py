@@ -71,7 +71,7 @@ def _send_verification_email(request: Request, db: DbSession, user: User) -> Non
     link = f"{str(request.base_url).rstrip('/')}{url('/auth/verify-email')}?token={token}"
     send_email(
         user.email,
-        "Verify your FinOps Dhan Algo account",
+        "Verify your FinOps Algo account",
         html_body=(
             f"<p>Click to verify your account:</p><p><a href='{link}'>{link}</a></p>"
             f"<p>This link expires in {EMAIL_VERIFICATION_EXPIRY_HOURS} hours.</p>"
@@ -92,7 +92,7 @@ def _send_pending_approval_notice(request: Request, user: User) -> None:
     review_link = f"{str(request.base_url).rstrip('/')}{url('/admin/users')}"
     send_email(
         settings.superadmin_email,
-        "New FinOps Dhan Algo account awaiting approval",
+        "New FinOps Algo account awaiting approval",
         html_body=(
             f"<p>{user.email} has verified their email and is waiting for approval.</p>"
             f"<p><a href='{review_link}'>Review pending accounts</a></p>"
@@ -105,7 +105,7 @@ def _send_approved_email(user: User) -> None:
     login_link_note = "You can now log in."
     send_email(
         user.email,
-        "Your FinOps Dhan Algo account has been approved",
+        "Your FinOps Algo account has been approved",
         html_body=f"<p>Your account has been approved by the admin. {login_link_note}</p>",
         text_body=f"Your account has been approved by the admin. {login_link_note}",
     )
@@ -120,7 +120,7 @@ def _send_password_reset_email(request: Request, db: DbSession, user: User) -> N
     link = f"{str(request.base_url).rstrip('/')}{url('/auth/reset-password')}?token={token}"
     send_email(
         user.email,
-        "Reset your FinOps Dhan Algo password",
+        "Reset your FinOps Algo password",
         html_body=(
             f"<p>Click to reset your password:</p><p><a href='{link}'>{link}</a></p>"
             f"<p>This link expires in {PASSWORD_RESET_EXPIRY_HOURS} hour(s). "

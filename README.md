@@ -1,4 +1,4 @@
-# FinOps Dhan Algo
+# FinOps Algo
 
 A multi-tenant algo-trading platform: users sign up, connect their own Dhan
 account (Client ID + Access Token), and enable option-selling strategies
