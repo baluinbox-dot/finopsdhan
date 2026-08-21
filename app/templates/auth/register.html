@@ -8,13 +8,8 @@
                 <i class="bi bi-shield-lock text-primary" style="font-size: 2rem;"></i>
                 <h4 class="mt-2 mb-0">Create Account</h4>
             </div>
-            <div class="alert alert-info small">
-                <i class="bi bi-info-circle"></i>
-                This app trades through your own Dhan broker account. If you don't have one yet, open it using our link —
-                free Demat, ₹0 AMC for life, zero brokerage on investing, ₹20/order for trading:
-                <a href="{{ dhan_referral_url }}" target="_blank" rel="noopener noreferrer">{{ dhan_referral_url }}</a>
-                <br>Once your account is approved here, you'll connect that Dhan Client ID and access token from Settings.
-            </div>
+            {% include "auth/_dhan_referral_banner.html" %}
+            <p class="small text-body-secondary">Once your account is approved here, you'll connect that Dhan Client ID and access token from Settings.</p>
             <form method="post" action="{{ url('/auth/register') }}">
                 <div class="mb-3">
                     <label class="form-label">Email</label>
