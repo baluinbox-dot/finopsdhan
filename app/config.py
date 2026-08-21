@@ -18,6 +18,13 @@ class Settings(BaseSettings):
     superadmin_email: str = "baluinbox@gmail.com"
     env: str = "development"
 
+    # Shown on the registration page — new users are asked to open their
+    # Dhan trading account through this link (required before they can
+    # connect Dhan credentials in Settings and run strategies). Purely
+    # informational on our side; we have no way to verify the referral was
+    # actually used, so this is a prompt, not an enforced gate.
+    dhan_referral_url: str = "https://join.dhan.co/?invite=YZWFE83099"
+
     strategy_poll_interval_seconds: int = 30
     allow_live_trading: bool = False
 

@@ -26,6 +26,7 @@ def _register_and_login(client, db_session, email: str, password: str = "superse
     # login works — simulate that directly rather than needing real SMTP.
     user = db_session.scalar(select(User).where(User.email == email))
     user.email_verified = True
+    user.is_approved = True
     db_session.commit()
 
     client.get("/auth/login")

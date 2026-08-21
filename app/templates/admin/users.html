@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+{% block title %}User Approvals — FinOps Dhan Algo{% endblock %}
+{% block content %}
+<h4 class="mb-3">
+    User Approvals (Superadmin)
+    {% if pending_count %}<span class="badge text-bg-warning">{{ pending_count }} pending</span>{% endif %}
+</h4>
+<p class="small text-body-secondary">
+    A new account can only log in once it's approved here (after they've verified their email).
+</p>
+
+<div class="table-responsive mb-4">
+    <table class="table table-sm align-middle">
+        <thead>
+            <tr>
+                <th>Email</th>
+                <th>Role</th>
+                <th>Email Verified</th>
+                <th>Approved</th>
+                <th>Active</th>
+                <th>Registered</th>
+                <th></th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for u in users %}
+            <tr>
+                <td>{{ u.email }}</td>
+                <td>{{ u.role.value }}</td>
+                <td>
+                    {% if u.email_verified %}<span class="badge text-bg-success">Yes</span>
+                    {% else %}<span class="badge text-bg-secondary">No</span>{% endif %}
+                </td>
+                <td>
+                    {% if u.is_approved %}<span class="badge text-bg-success">Yes</span>
+                    {% else %}<span class="badge text-bg-warning">Pending</span>{% endif %}
+                </td>
+                <td>
+                    {% if u.is_active %}<span class="badge text-bg-success">Yes</span>
+                    {% else %}<span class="badge text-bg-danger">Disabled</span>{% endif %}
+                </td>
+                <td><small>{{ (u.created_at | to_ist).strftime('%d %b %Y, %H:%M') ~ ' IST' if u.created_at else '' }}</small></td>
+                <td>
+                    <div class="d-flex gap-2 flex-wrap">
+                        {% if not u.is_approved %}
+                        <form method="post" action="{{ url('/admin/users/' ~ u.id ~ '/approve') }}">
+                            <button class="btn btn-sm btn-primary" type="submit"
+                                {% if not u.email_verified %}disabled title="User hasn't verified their email yet"{% endif %}>
+                                Approve
+                            </button>
+                        </form>
+                        {% endif %}
+                        {% if u.is_active %}
+                        {% if u.id != current_user.id %}
+                        <form method="post" action="{{ url('/admin/users/' ~ u.id ~ '/disable') }}"
+                              onsubmit="return confirm('Disable {{ (u.email) | replace("'", "") }}? They will no longer be able to log in.');">
+                            <button class="btn btn-sm btn-outline-danger" type="submit">Disable</button>
+                        </form>
+                        {% endif %}
+                        {% else %}
+                        <form method="post" action="{{ url('/admin/users/' ~ u.id ~ '/enable') }}">
+                            <button class="btn btn-sm btn-outline-success" type="submit">Re-enable</button>
+                        </form>
+                        {% endif %}
+                    </div>
+                </td>
+            </tr>
+            {% else %}
+            <tr><td colspan="7" class="text-body-secondary">No users yet.</td></tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}

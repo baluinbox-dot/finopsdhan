@@ -83,6 +83,34 @@ def _send_verification_email(request: Request, db: DbSession, user: User) -> Non
     )
 
 
+def _send_pending_approval_notice(request: Request, user: User) -> None:
+    """Tell the superadmin a newly-verified account is waiting for
+    approval. Best-effort — same no-SMTP-configured no-op as every other
+    email in this module; the account still shows up in /admin/users
+    either way, so a failed/unsent notice never blocks approval."""
+    settings = get_settings()
+    review_link = f"{str(request.base_url).rstrip('/')}{url('/admin/users')}"
+    send_email(
+        settings.superadmin_email,
+        "New FinOps Dhan Algo account awaiting approval",
+        html_body=(
+            f"<p>{user.email} has verified their email and is waiting for approval.</p>"
+            f"<p><a href='{review_link}'>Review pending accounts</a></p>"
+        ),
+        text_body=f"{user.email} has verified their email and is waiting for approval.\nReview: {review_link}",
+    )
+
+
+def _send_approved_email(user: User) -> None:
+    login_link_note = "You can now log in."
+    send_email(
+        user.email,
+        "Your FinOps Dhan Algo account has been approved",
+        html_body=f"<p>Your account has been approved by the admin. {login_link_note}</p>",
+        text_body=f"Your account has been approved by the admin. {login_link_note}",
+    )
+
+
 def _send_password_reset_email(request: Request, db: DbSession, user: User) -> None:
     token = secrets.token_urlsafe(32)
     user.password_reset_token = token
@@ -110,7 +138,9 @@ def _send_password_reset_email(request: Request, db: DbSession, user: User) -> N
 def register_form(request: Request, current_user: CurrentUserOptional):
     if current_user:
         return RedirectResponse(url("/dashboard"), status_code=303)
-    return render(request, "auth/register.html", _new_captcha(request))
+    context = _new_captcha(request)
+    context["dhan_referral_url"] = get_settings().dhan_referral_url
+    return render(request, "auth/register.html", context)
 
 
 @router.post("/register")
@@ -148,7 +178,19 @@ def register_submit(
     settings = get_settings()
     role = UserRole.SUPERADMIN if email == settings.superadmin_email.strip().lower() else UserRole.USER
 
-    user = User(email=email, password_hash=hash_password(password), role=role, email_verified=False)
+    # Every other new account needs a superadmin to approve it (see
+    # login_submit below and app.routers.admin) before it can log in — the
+    # superadmin's own account is exempt, since there'd be nobody else to
+    # approve it.
+    is_superadmin = role == UserRole.SUPERADMIN
+    user = User(
+        email=email,
+        password_hash=hash_password(password),
+        role=role,
+        email_verified=False,
+        is_approved=is_superadmin,
+        approved_at=datetime.now(timezone.utc) if is_superadmin else None,
+    )
     db.add(user)
     try:
         db.commit()
@@ -194,7 +236,16 @@ def verify_email(request: Request, db: DbSession, token: str = ""):
     user.email_verification_sent_at = None
     db.commit()
 
-    flash(request, "Email verified — you can now log in.", "success")
+    if user.is_approved:
+        flash(request, "Email verified — you can now log in.", "success")
+    else:
+        _send_pending_approval_notice(request, user)
+        flash(
+            request,
+            "Email verified. Your account now awaits approval by the admin — "
+            "you'll be able to log in once it's approved.",
+            "success",
+        )
     return RedirectResponse(url("/auth/login"), status_code=303)
 
 
@@ -249,6 +300,10 @@ def login_submit(
     if not user.email_verified:
         flash(request, "Please verify your email before logging in — check your inbox, or resend the link below.", "error")
         return RedirectResponse(f"{url('/auth/resend-verification')}?email={user.email}", status_code=303)
+
+    if not user.is_approved:
+        flash(request, "Your account is awaiting approval by the admin. You'll be able to log in once it's approved.", "error")
+        return RedirectResponse(url("/auth/login"), status_code=303)
 
     request.session.clear()
     request.session["user_id"] = str(user.id)
