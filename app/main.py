@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
-from fastapi.responses import RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
@@ -15,7 +15,7 @@ from app.deps import CurrentUserOptional
 from app.engine.scheduler import start_scheduler, stop_scheduler
 from app.routers import admin, auth, dashboard, reports, settings as settings_router, strategies
 from app.seed import seed_demo_strategy
-from app.templating import url
+from app.templating import static_url, url
 
 settings = get_settings()
 
@@ -65,3 +65,43 @@ def index(current_user: CurrentUserOptional):
 @app.get(url("/healthz"))
 def healthz():
     return {"status": "ok"}
+
+
+# --- PWA: installable home-screen app (manifest + service worker) ---
+#
+# Both must go through `url()`/`static_url()` rather than being plain static
+# files, because this app can be deployed under a path prefix (e.g.
+# `BASE_PATH=/finopsdhan` on the VM, alongside other apps on the same
+# domain) — a static manifest.json baked at repo-build time would have no
+# way to know that prefix, and would send a mobile browser to the wrong
+# start_url/scope on that deployment.
+@app.get(url("/manifest.json"))
+def pwa_manifest():
+    manifest = {
+        "name": "FinOps Dhan Algo",
+        "short_name": "Dhan Algo",
+        "description": "Multi-tenant algo-trading dashboard connected to your own Dhan broker account.",
+        "start_url": url("/"),
+        "scope": url("/"),
+        "display": "standalone",
+        "background_color": "#1e3a5f",
+        "theme_color": "#1e3a5f",
+        "orientation": "portrait-primary",
+        "icons": [
+            {"src": static_url("icons/icon-192.png"), "sizes": "192x192", "type": "image/png", "purpose": "any"},
+            {"src": static_url("icons/icon-192.png"), "sizes": "192x192", "type": "image/png", "purpose": "maskable"},
+            {"src": static_url("icons/icon-512.png"), "sizes": "512x512", "type": "image/png", "purpose": "any"},
+            {"src": static_url("icons/icon-512.png"), "sizes": "512x512", "type": "image/png", "purpose": "maskable"},
+        ],
+    }
+    return JSONResponse(manifest, media_type="application/manifest+json")
+
+
+# Served from the app root (not under /static/) so its default registration
+# scope covers the whole app — a service worker's scope defaults to the
+# directory it's served from, and /static/sw.js would only ever be able to
+# control pages under /static/, which is useless for installability.
+@app.get(url("/sw.js"))
+def pwa_service_worker():
+    content = (static_dir / "sw.js").read_text(encoding="utf-8")
+    return Response(content, media_type="application/javascript")
