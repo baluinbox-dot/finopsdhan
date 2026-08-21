@@ -57,6 +57,14 @@ class User(Base):
     email_verification_token: Mapped[str | None] = mapped_column(String(64), unique=True, index=True, nullable=True)
     email_verification_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
+    # A verified account still can't log in until the superadmin approves it
+    # (see app.routers.auth.login_submit and app.routers.admin). Superadmin
+    # accounts are auto-approved at registration (app.routers.auth). Existing
+    # accounts (pre-dating this feature) are backfilled to True by the
+    # migration so nobody already registered gets locked out.
+    is_approved: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
     password_reset_token: Mapped[str | None] = mapped_column(String(64), unique=True, index=True, nullable=True)
     password_reset_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 

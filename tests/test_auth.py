@@ -47,6 +47,15 @@ def _verify(db_session, email: str) -> None:
     db_session.commit()
 
 
+def _approve(db_session, email: str) -> None:
+    """Simulate the superadmin clicking Approve in /admin/users — a verified
+    regular-user account still can't log in until this happens."""
+    user = db_session.scalar(select(User).where(User.email == email))
+    assert user is not None
+    user.is_approved = True
+    db_session.commit()
+
+
 def test_register_creates_unverified_account_login_blocked_until_verified(client, db_session):
     resp = _register(client, "someone@example.com")
     assert resp.status_code == 303
@@ -78,6 +87,16 @@ def test_verify_email_then_login_succeeds(client, db_session):
     db_session.refresh(user)
     assert user.email_verified is True
     assert user.email_verification_token is None
+    assert user.is_approved is False  # verified alone isn't enough — still needs admin approval
+
+    # Verified but not yet approved — login still blocked.
+    resp = _login(client, "verifyme@example.com")
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/auth/login"
+    dash = client.get("/dashboard", follow_redirects=False)
+    assert dash.status_code == 401
+
+    _approve(db_session, "verifyme@example.com")
 
     resp = _login(client, "verifyme@example.com")
     assert resp.status_code == 303
@@ -187,6 +206,12 @@ def test_register_superadmin_and_regular_user(client, db_session):
     assert superadmin.role == UserRole.SUPERADMIN
     assert regular.role == UserRole.USER
 
+    # The superadmin's own account is auto-approved (nobody else to approve
+    # it); every other new account starts unapproved and needs the
+    # superadmin to approve it in /admin/users before it can log in.
+    assert superadmin.is_approved is True
+    assert regular.is_approved is False
+
 
 def test_register_password_mismatch_does_not_create_user(client, db_session):
     client.get("/auth/register")
@@ -202,6 +227,7 @@ def test_register_password_mismatch_does_not_create_user(client, db_session):
 def test_login_success_and_wrong_password(client, db_session):
     _register(client, "loginuser@example.com", password="correcthorse1")
     _verify(db_session, "loginuser@example.com")
+    _approve(db_session, "loginuser@example.com")
 
     bad = _login(client, "loginuser@example.com", password="wrongpassword")
     assert bad.status_code == 303
@@ -218,6 +244,7 @@ def test_login_success_and_wrong_password(client, db_session):
 def test_forgot_password_then_reset_then_login(client, db_session):
     _register(client, "resetme@example.com", password="oldpassword1")
     _verify(db_session, "resetme@example.com")
+    _approve(db_session, "resetme@example.com")
 
     resp = client.post("/auth/forgot-password", data={"email": "resetme@example.com"}, follow_redirects=False)
     assert resp.status_code == 303
@@ -251,6 +278,7 @@ def test_forgot_password_does_not_leak_account_existence(client, db_session):
 def test_reset_password_expired_token_rejected(client, db_session):
     _register(client, "resetme@example.com")
     _verify(db_session, "resetme@example.com")
+    _approve(db_session, "resetme@example.com")
     client.post("/auth/forgot-password", data={"email": "resetme@example.com"}, follow_redirects=False)
 
     user = db_session.scalar(select(User).where(User.email == "resetme@example.com"))
@@ -283,3 +311,26 @@ def test_reset_password_bad_token_rejected(client, db_session):
 def test_dashboard_requires_login(client):
     resp = client.get("/dashboard", follow_redirects=False)
     assert resp.status_code == 401
+
+
+def test_superadmin_login_bypasses_approval_gate(client, db_session):
+    """The superadmin account is auto-approved at registration — email
+    verification alone is enough to log in, no separate approval step."""
+    _register(client, "baluinbox@gmail.com")
+    _verify(db_session, "baluinbox@gmail.com")
+
+    resp = _login(client, "baluinbox@gmail.com")
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/dashboard"
+
+
+def test_verified_but_unapproved_login_shows_pending_message(client, db_session):
+    _register(client, "pending@example.com")
+    _verify(db_session, "pending@example.com")
+
+    resp = _login(client, "pending@example.com")
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/auth/login"
+
+    user = db_session.scalar(select(User).where(User.email == "pending@example.com"))
+    assert user.is_approved is False

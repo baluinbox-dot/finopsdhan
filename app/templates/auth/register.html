@@ -8,6 +8,13 @@
                 <i class="bi bi-shield-lock text-primary" style="font-size: 2rem;"></i>
                 <h4 class="mt-2 mb-0">Create Account</h4>
             </div>
+            <div class="alert alert-info small">
+                <i class="bi bi-info-circle"></i>
+                This app trades through your own Dhan broker account. If you don't have one yet, open it using our link —
+                free Demat, ₹0 AMC for life, zero brokerage on investing, ₹20/order for trading:
+                <a href="{{ dhan_referral_url }}" target="_blank" rel="noopener noreferrer">{{ dhan_referral_url }}</a>
+                <br>Once your account is approved here, you'll connect that Dhan Client ID and access token from Settings.
+            </div>
             <form method="post" action="{{ url('/auth/register') }}">
                 <div class="mb-3">
                     <label class="form-label">Email</label>
@@ -22,6 +29,12 @@
                     <label class="form-label">Confirm Password</label>
                     <input type="password" name="confirm_password" class="form-control" minlength="8" required>
                 </div>
+                <div class="mb-3 form-check">
+                    <input type="checkbox" class="form-check-input" id="dhanReferralAck" name="dhan_referral_ack" required>
+                    <label class="form-check-label small" for="dhanReferralAck">
+                        I'll open (or already have) my Dhan account using the link above.
+                    </label>
+                </div>
                 <div class="mb-3">
                     <label class="form-label">What is {{ captcha_a }} + {{ captcha_b }}?</label>
                     <input type="text" inputmode="numeric" name="captcha_answer" class="form-control" required>
@@ -29,6 +42,7 @@
                 <button id="registerBtn" type="submit" class="btn btn-primary w-100">Create Account</button>
             </form>
             <p class="mt-3 mb-0 small text-body-secondary text-center">Already have an account? <a href="{{ url('/auth/login') }}">Log in</a>.</p>
+            <p class="mt-2 mb-0 small text-body-secondary text-center">New accounts need admin approval after email verification before you can log in.</p>
         </div>
     </div>
 </div>
