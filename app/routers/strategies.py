@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import json
 import uuid
+from collections import defaultdict
+from datetime import date
 
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import RedirectResponse
@@ -20,6 +22,23 @@ from app.strategies.registry import RICH_CONFIG_STRATEGIES, STRATEGY_REGISTRY, g
 from app.templating import flash, render, url
 
 router = APIRouter(prefix="/strategies", tags=["strategies"])
+
+
+def _classify_expiries(expiries: list[str]) -> dict[str, str]:
+    """Labels each 'YYYY-MM-DD' expiry as "monthly" (the last expiry of its
+    calendar month in the given list) or "weekly" (every other one) — Dhan's
+    expiry_list has no such flag itself, so it's derived here purely from
+    the dates returned. Unparseable entries are left out of the map (and so
+    are never treated as "monthly")."""
+    by_month: dict[tuple[int, int], list[str]] = defaultdict(list)
+    for expiry in expiries:
+        try:
+            parsed = date.fromisoformat(expiry)
+        except ValueError:
+            continue
+        by_month[(parsed.year, parsed.month)].append(expiry)
+    monthly = {max(dates) for dates in by_month.values()}
+    return {expiry: ("monthly" if expiry in monthly else "weekly") for expiry in expiries}
 
 
 @router.get("")
@@ -1126,6 +1145,232 @@ def configure_rolling_legsl_submit(
             return RedirectResponse(url("/strategies"), status_code=303)
 
     final_label = label.strip() or f"3-Pair Rolling Leg-SL {params['underlying']}"
+
+    if existing:
+        existing.label = final_label
+        existing.params = params
+        existing.mode = requested_mode
+        existing.is_active = True
+    else:
+        db.add(
+            UserStrategy(
+                user_id=current_user.id,
+                strategy_id=strategy_id,
+                label=final_label,
+                params=params,
+                mode=requested_mode,
+                is_active=True,
+            )
+        )
+    db.commit()
+
+    flash(request, f"{final_label} configured and enabled in {requested_mode.value} mode.", "success")
+    return RedirectResponse(url("/strategies"), status_code=303)
+
+
+@router.get("/{strategy_id}/configure-iron-condor")
+def configure_iron_condor_form(
+    request: Request,
+    db: DbSession,
+    current_user: CurrentUser,
+    strategy_id: uuid.UUID,
+    user_strategy_id: str = "",
+    underlying: str = "",
+    expiry: str = "",
+    expiry_type: str = "",
+):
+    strategy = db.get(Strategy, strategy_id)
+    if strategy is None or not strategy.is_published:
+        flash(request, "Strategy not found.", "error")
+        return RedirectResponse(url("/strategies"), status_code=303)
+
+    existing: UserStrategy | None = None
+    if user_strategy_id:
+        try:
+            existing = db.get(UserStrategy, uuid.UUID(user_strategy_id))
+        except ValueError:
+            existing = None
+        if existing is None or existing.user_id != current_user.id or existing.strategy_id != strategy_id:
+            flash(request, "Strategy instance not found.", "error")
+            return RedirectResponse(url("/strategies"), status_code=303)
+
+    existing_params = existing.params if existing else {}
+    underlying = (underlying or existing_params.get("underlying") or "NIFTY").upper()
+    if underlying not in UNDERLYINGS:
+        underlying = "NIFTY"
+    expiry_type = (expiry_type or existing_params.get("expiry_type") or "weekly").lower()
+    if expiry_type not in ("weekly", "monthly"):
+        expiry_type = "weekly"
+    if not expiry:
+        expiry = existing_params.get("expiry") or ""
+
+    has_dhan = current_user.dhan_credential is not None and current_user.dhan_credential.is_active
+
+    try:
+        strategy_cls = get_strategy_class(strategy.code_ref)
+        class_defaults = strategy_cls.default_params
+    except ValueError:
+        class_defaults = {}
+    params = {**class_defaults, **strategy.default_params, **existing_params}
+    params["underlying"] = underlying
+    params["expiry_type"] = expiry_type
+
+    all_expiries: list[str] = []
+    expiries: list[str] = []
+    expiry_error: str | None = None
+    condor_preview: dict | None = None
+    selected_expiry = expiry
+
+    if has_dhan:
+        try:
+            user_dhan = get_user_dhan_client(db, current_user)
+            all_expiries = list_expiries(user_dhan.client, underlying)
+        except DhanNotConnectedError as exc:
+            expiry_error = str(exc)
+        except Exception as exc:  # noqa: BLE001
+            expiry_error = f"Could not fetch expiries from Dhan: {exc}"
+
+        expiry_labels = _classify_expiries(all_expiries)
+        expiries = [e for e in all_expiries if expiry_labels.get(e) == expiry_type]
+
+        if selected_expiry not in expiries:
+            selected_expiry = expiries[0] if expiries else ""
+
+        if selected_expiry and selected_expiry in expiries:
+            try:
+                meta = UNDERLYINGS[underlying]
+                chain_df, spot = fetch_chain_df(
+                    user_dhan.client,
+                    under_security_id=meta["security_id"],
+                    expiry=selected_expiry,
+                    under_exchange_segment=meta["exchange_segment"],
+                )
+                if not chain_df.empty:
+                    strikes = sorted(chain_df["strike"].tolist())
+                    sell_offset = float(params.get("sell_offset_points") or 250)
+                    buy_offset = float(params.get("buy_offset_points") or 350)
+                    ceb = min(strikes, key=lambda x: abs(x - (spot + buy_offset)))
+                    ces = min(strikes, key=lambda x: abs(x - (spot + sell_offset)))
+                    pes = min(strikes, key=lambda x: abs(x - (spot - sell_offset)))
+                    peb = min(strikes, key=lambda x: abs(x - (spot - buy_offset)))
+                    condor_preview = {"spot": spot, "ceb": ceb, "ces": ces, "pes": pes, "peb": peb}
+            except Exception as exc:  # noqa: BLE001 — preview is a nice-to-have, never block the form
+                expiry_error = expiry_error or f"Could not fetch live strikes: {exc}"
+
+    return render(
+        request,
+        "strategies/configure_iron_condor.html",
+        {
+            "current_user": current_user,
+            "user_strategy_id": user_strategy_id,
+            "strategy": strategy,
+            "has_dhan": has_dhan,
+            "underlyings": UNDERLYINGS,
+            "selected_underlying": underlying,
+            "selected_expiry_type": expiry_type,
+            "selected_expiry": selected_expiry,
+            "expiries": expiries,
+            "expiry_error": expiry_error,
+            "condor_preview": condor_preview,
+            "params": params,
+            "existing": existing,
+        },
+    )
+
+
+@router.post("/{strategy_id}/configure-iron-condor")
+def configure_iron_condor_submit(
+    request: Request,
+    db: DbSession,
+    current_user: CurrentUser,
+    strategy_id: uuid.UUID,
+    user_strategy_id: str = Form(""),
+    label: str = Form(""),
+    underlying: str = Form(...),
+    expiry_type: str = Form("weekly"),
+    expiry: str = Form(...),
+    lots: int = Form(1),
+    start_time: str = Form("09:20"),
+    end_time: str = Form("14:45"),
+    sell_offset_points: float = Form(250),
+    buy_offset_points: float = Form(350),
+    roll_gap_points: float = Form(100),
+    sl_target_mode: str = Form("fixed"),
+    stop_loss_value: float = Form(10000),
+    target_value: float = Form(15000),
+    mode: str = Form("paper"),
+):
+    strategy = db.get(Strategy, strategy_id)
+    if strategy is None or not strategy.is_published:
+        flash(request, "Strategy not found.", "error")
+        return RedirectResponse(url("/strategies"), status_code=303)
+
+    if not current_user.dhan_credential or not current_user.dhan_credential.is_active:
+        flash(request, "Connect your Dhan account on the Settings page before enabling a strategy.", "error")
+        return RedirectResponse(url("/strategies"), status_code=303)
+
+    if underlying.upper() not in UNDERLYINGS:
+        flash(request, "Unknown underlying.", "error")
+        return RedirectResponse(url(f"/strategies/{strategy_id}/configure-iron-condor"), status_code=303)
+
+    if not expiry:
+        flash(request, "Pick an expiry before saving.", "error")
+        redirect_url = f"/strategies/{strategy_id}/configure-iron-condor?underlying={underlying}"
+        if user_strategy_id:
+            redirect_url += f"&user_strategy_id={user_strategy_id}"
+        return RedirectResponse(url(redirect_url), status_code=303)
+
+    if sell_offset_points <= 0 or buy_offset_points <= sell_offset_points:
+        flash(request, "Buy Wing Offset must be greater than Sell Strike Offset, and both must be positive.", "error")
+        redirect_url = f"/strategies/{strategy_id}/configure-iron-condor?underlying={underlying}&expiry={expiry}"
+        if user_strategy_id:
+            redirect_url += f"&user_strategy_id={user_strategy_id}"
+        return RedirectResponse(url(redirect_url), status_code=303)
+
+    if roll_gap_points <= 0:
+        flash(request, "Roll Gap must be greater than zero.", "error")
+        redirect_url = f"/strategies/{strategy_id}/configure-iron-condor?underlying={underlying}&expiry={expiry}"
+        if user_strategy_id:
+            redirect_url += f"&user_strategy_id={user_strategy_id}"
+        return RedirectResponse(url(redirect_url), status_code=303)
+
+    requested_mode = StrategyMode.LIVE if mode == "live" else StrategyMode.PAPER
+    if requested_mode == StrategyMode.LIVE:
+        flash(
+            request,
+            "Live trading isn't enabled from this screen yet — the strategy has been "
+            "turned on in paper mode instead. Live mode requires a separate explicit "
+            "confirmation step.",
+            "warning",
+        )
+        requested_mode = StrategyMode.PAPER
+
+    params = {
+        "underlying": underlying.upper(),
+        "expiry_type": "monthly" if expiry_type == "monthly" else "weekly",
+        "expiry": expiry,
+        "lots": lots,
+        "start_time": start_time,
+        "end_time": end_time,
+        "sell_offset_points": sell_offset_points,
+        "buy_offset_points": buy_offset_points,
+        "roll_gap_points": roll_gap_points,
+        "sl_target_mode": "pct" if sl_target_mode == "pct" else "fixed",
+        "stop_loss_value": stop_loss_value,
+        "target_value": target_value,
+    }
+
+    existing: UserStrategy | None = None
+    if user_strategy_id:
+        try:
+            existing = db.get(UserStrategy, uuid.UUID(user_strategy_id))
+        except ValueError:
+            existing = None
+        if existing is None or existing.user_id != current_user.id or existing.strategy_id != strategy_id:
+            flash(request, "Strategy instance not found.", "error")
+            return RedirectResponse(url("/strategies"), status_code=303)
+
+    final_label = label.strip() or f"Iron Condor Rolling {params['underlying']}"
 
     if existing:
         existing.label = final_label
