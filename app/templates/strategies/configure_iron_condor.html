@@ -94,11 +94,18 @@
             <div class="col-md-4">
                 <label class="form-label">Start Time</label>
                 <input type="time" name="start_time" value="{{ params.start_time }}" class="form-control">
+                <div class="form-text">Daily window for the first entry — not a daily close time.</div>
             </div>
             <div class="col-md-4">
                 <label class="form-label">End Time</label>
                 <input type="time" name="end_time" value="{{ params.end_time }}" class="form-control">
-                <div class="form-text">Every leg force-closes here; no new orders or rolls after.</div>
+                <div class="form-text">Daily entry window end, and the force-close time on <strong>expiry day only</strong>.</div>
+            </div>
+            <div class="col-12 small text-body-secondary">
+                This is <strong>not an intraday strategy</strong> — once entered, the position (and any rolls) stays
+                open across multiple days and is only force-closed on the expiry day itself, at End Time above (or by
+                the stop-loss/target below, whichever comes first). Legs are placed as carry-forward (MARGIN), not
+                INTRADAY, so the broker doesn't square them off overnight on its own.
             </div>
 
             <div class="col-12"><hr></div>
@@ -147,8 +154,8 @@
             </div>
             <div class="col-12 small text-body-secondary">
                 Checked continuously against the <strong>combined</strong> live P&amp;L across everything still open
-                plus everything already realized today — whichever hits first closes every remaining leg and stops
-                the strategy for the rest of the day.
+                plus everything already realized this run (across every day it's been open) — whichever hits first
+                closes every remaining leg and ends the position, before expiry if needed.
             </div>
 
             <div class="col-12"><hr></div>
