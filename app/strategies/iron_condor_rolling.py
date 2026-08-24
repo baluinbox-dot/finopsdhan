@@ -9,6 +9,16 @@ require paying a debit or admitting a directional loss, so it is left
 alone; the untested side is dragged in to collect fresh credit and keep
 the position balanced.
 
+Unlike the other rolling strategies in this app, this one is **not**
+intraday — it holds the position across multiple days (rolling as
+needed, any day the market is open) and only force-closes on the expiry
+day itself, at `end_time`. Legs are placed with `product_type="MARGIN"`
+(not `"INTRADAY"`), because an INTRADAY product would get auto-squared-off
+by the broker itself every day regardless of what this strategy wants.
+`start_time`/`end_time` still bound the daily entry window (what time of
+day a first entry may happen), but only the expiry day's `end_time` — not
+every day's — triggers the whole-position close.
+
 The roll gap is not a separate configured number — it's derived live from
 the *triggering* (tested) side's own current wing width (CEB-CES, or
 PEB-PES), so the untested side's new sell strike always lands exactly on
@@ -34,25 +44,25 @@ currently-open CEB/PEB leg. A later roll of the CE side itself creates a
 brand new CEB leg with fresh (untriggered) state, so the chase mechanism
 keeps working across repeated reversals. If price just keeps running past
 the tested side without the position closing on it, only the whole-run
-stop-loss/target (or end time) eventually steps in — by design, this
-strategy never moves the tested side to chase price.
+stop-loss/target (or the expiry-day close) eventually steps in — by
+design, this strategy never moves the tested side to chase price.
 
 Stop-loss/target is a single combined check against the *whole* open
 position (realized P&L so far this run + live mark-to-market on
 everything still open), in one of two modes chosen per instance:
   - "fixed": stop_loss_value / target_value are rupee amounts.
   - "pct":   stop_loss_value / target_value are percentages of the total
-    premium collected across every leg ever entered today (initial entry
-    plus every roll's new legs) — i.e. the position's own running credit,
-    not a hardcoded budget.
-Either firing closes every open leg and stops the strategy for the day,
-identical in spirit to the other rolling strategies' daily_stop_loss/
-daily_target.
+    premium collected across every leg ever entered this run, across every
+    day it's been open (initial entry plus every roll's new legs) — i.e.
+    the position's own running credit, not a hardcoded budget.
+Either firing closes every open leg and stops the strategy for good
+(not just for the day, since the position is meant to run until expiry
+regardless of the day it fires).
 """
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from datetime import time as dt_time
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -96,22 +106,23 @@ def _leg_state(sid: str, leg_state: dict) -> dict:
 class IronCondorRollingStrategy(Strategy):
     name = "Iron Condor — Untested-Side Rolling"
     description = (
-        "A 4-leg short Iron Condor (buy/sell call + sell/buy put) that adjusts by rolling only "
-        "the untested side closer to spot when the market reaches the tested side's outer wing "
-        "— the tested side is never moved, only the opposite side is dragged in for fresh credit. "
-        "A single combined stop-loss/target (fixed rupees or % of total premium collected) closes "
-        "everything and stops the strategy for the day."
+        "A 4-leg short Iron Condor (buy/sell call + sell/buy put), held across multiple days (not "
+        "intraday) and rolled as needed until expiry, that adjusts by rolling only the untested side "
+        "closer to spot when the market reaches the tested side's outer wing — the tested side is "
+        "never moved, only the opposite side is dragged in for fresh credit. A single combined "
+        "stop-loss/target (fixed rupees or % of total premium collected) can close it early; "
+        "otherwise it force-closes on the expiry day itself."
     )
     default_params = {
         "underlying": "NIFTY",
         "expiry": "",  # set at configure time from the live dropdown
         "expiry_type": "weekly",  # UI filter only ("weekly" | "monthly") — narrows the expiry dropdown
         "lots": 1,
-        "start_time": "09:20",
-        "end_time": "14:45",
+        "start_time": "09:20",  # daily window during which a first entry may happen
+        "end_time": "14:45",  # daily entry-window end, AND the force-close time on the expiry day itself
         "sell_offset_points": 250,  # CES/PES strike = spot +/- this
         "buy_offset_points": 350,  # CEB/PEB strike = spot +/- this (must be > sell_offset_points)
-        "sl_target_mode": "fixed",  # "fixed" (rupees) | "pct" (of total premium collected today)
+        "sl_target_mode": "fixed",  # "fixed" (rupees) | "pct" (of total premium collected this run so far)
         "stop_loss_value": 10000,
         "target_value": 15000,
     }
@@ -138,6 +149,12 @@ class IronCondorRollingStrategy(Strategy):
         expiry = p.get("expiry")
         if not expiry:
             return None
+        try:
+            expiry_date = date.fromisoformat(expiry)
+        except ValueError:
+            return None
+        if now_ist.date() > expiry_date:
+            return None  # this contract has already expired — never enter it
 
         sell_offset = float(p.get("sell_offset_points") or 0)
         buy_offset = float(p.get("buy_offset_points") or 0)
@@ -200,7 +217,7 @@ class IronCondorRollingStrategy(Strategy):
                 transaction_type=txn,
                 quantity=quantity,
                 order_type="LIMIT",
-                product_type="INTRADAY",
+                product_type="MARGIN",  # carried forward across days, NOT auto-squared-off intraday by the broker
                 price=float(row[price_col]),
                 role="primary",
                 pair_id=pair_id,
@@ -208,7 +225,12 @@ class IronCondorRollingStrategy(Strategy):
 
         return legs
 
-    # --- whole-run exit: end time + combined stop-loss/target ---
+    # --- whole-run exit: expiry-day close + combined stop-loss/target ---
+    # Deliberately NOT a daily end_time close — this strategy holds across
+    # days. It only force-closes once the *expiry date itself* has been
+    # reached (never before), and even then only at end_time that day —
+    # so a position from an earlier day is left alone by this check on
+    # every day before expiry, no matter how late the clock gets.
 
     def evaluate_exit(self, ctx: StrategyContext, open_run_notes: dict[str, Any]) -> bool:
         p = {**self.default_params, **ctx.params}
@@ -216,9 +238,18 @@ class IronCondorRollingStrategy(Strategy):
         if not legs:
             return False
 
-        end_time = _parse_hhmm(p["end_time"])
-        if _now_ist().time() >= end_time:
-            return True
+        now_ist = _now_ist()
+        expiry = p.get("expiry")
+        if expiry:
+            try:
+                expiry_date = date.fromisoformat(expiry)
+            except ValueError:
+                expiry_date = None
+            if expiry_date is not None:
+                if now_ist.date() > expiry_date:
+                    return True  # expiry has fully passed — safety catch-up, close immediately regardless of time
+                if now_ist.date() == expiry_date and now_ist.time() >= _parse_hhmm(p["end_time"]):
+                    return True  # expiry day itself, past the close time
 
         leg_state = open_run_notes.get("leg_state") or {}
         open_legs = [leg for leg in legs if _leg_state(str(leg["security_id"]), leg_state)["status"] == "open"]
@@ -241,10 +272,11 @@ class IronCondorRollingStrategy(Strategy):
 
         total_pnl = realized_so_far + unrealized
 
-        # Total premium ever collected today (initial entry + every roll's
-        # new legs) — the running credit base for "pct" mode. Includes
-        # closed legs too; their entry premium was collected regardless of
-        # whether that leg has since been rolled away.
+        # Total premium ever collected this run, across every day it's been
+        # open (initial entry + every roll's new legs) — the running credit
+        # base for "pct" mode. Includes closed legs too; their entry
+        # premium was collected regardless of whether that leg has since
+        # been rolled away.
         total_premium_collected = sum(
             float(leg["price"]) * leg["quantity"] if leg["transaction_type"] == "SELL" else -float(leg["price"]) * leg["quantity"]
             for leg in legs
@@ -372,13 +404,13 @@ class IronCondorRollingStrategy(Strategy):
                         OrderLeg(
                             label=f"ROLL PES SELL {int(new_pes_strike)} PE ({expiry})", security_id=str(pes_row["pe_security_id"]),
                             trading_symbol=f"{underlying} {int(new_pes_strike)} PE {expiry}", exchange_segment=meta["option_segment"],
-                            transaction_type="SELL", quantity=quantity, order_type="LIMIT", product_type="INTRADAY",
+                            transaction_type="SELL", quantity=quantity, order_type="LIMIT", product_type="MARGIN",
                             price=float(pes_row["pe_ltp"]), role="primary", pair_id="PE",
                         ),
                         OrderLeg(
                             label=f"ROLL PEB BUY {int(new_peb_strike)} PE ({expiry})", security_id=str(peb_row["pe_security_id"]),
                             trading_symbol=f"{underlying} {int(new_peb_strike)} PE {expiry}", exchange_segment=meta["option_segment"],
-                            transaction_type="BUY", quantity=quantity, order_type="LIMIT", product_type="INTRADAY",
+                            transaction_type="BUY", quantity=quantity, order_type="LIMIT", product_type="MARGIN",
                             price=float(peb_row["pe_ltp"]), role="primary", pair_id="PE",
                         ),
                     ]
@@ -411,13 +443,13 @@ class IronCondorRollingStrategy(Strategy):
                         OrderLeg(
                             label=f"ROLL CES SELL {int(new_ces_strike)} CE ({expiry})", security_id=str(ces_row["ce_security_id"]),
                             trading_symbol=f"{underlying} {int(new_ces_strike)} CE {expiry}", exchange_segment=meta["option_segment"],
-                            transaction_type="SELL", quantity=quantity, order_type="LIMIT", product_type="INTRADAY",
+                            transaction_type="SELL", quantity=quantity, order_type="LIMIT", product_type="MARGIN",
                             price=float(ces_row["ce_ltp"]), role="primary", pair_id="CE",
                         ),
                         OrderLeg(
                             label=f"ROLL CEB BUY {int(new_ceb_strike)} CE ({expiry})", security_id=str(ceb_row["ce_security_id"]),
                             trading_symbol=f"{underlying} {int(new_ceb_strike)} CE {expiry}", exchange_segment=meta["option_segment"],
-                            transaction_type="BUY", quantity=quantity, order_type="LIMIT", product_type="INTRADAY",
+                            transaction_type="BUY", quantity=quantity, order_type="LIMIT", product_type="MARGIN",
                             price=float(ceb_row["ce_ltp"]), role="primary", pair_id="CE",
                         ),
                     ]

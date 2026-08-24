@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from unittest.mock import MagicMock, patch
 from zoneinfo import ZoneInfo
 
@@ -127,6 +127,19 @@ def test_entry_creates_four_legs_at_the_configured_offsets():
     assert by_label["PES"].transaction_type == "SELL" and by_label["PES"].pair_id == "PE"
     assert by_label["PEB"].transaction_type == "BUY" and by_label["PEB"].pair_id == "PE"
     assert all(leg.role == "primary" for leg in legs)
+    # MARGIN (carry-forward), not INTRADAY -- this position is meant to
+    # survive overnight until expiry, so the broker must not auto-square it.
+    assert all(leg.product_type == "MARGIN" for leg in legs)
+
+
+def test_entry_blocked_when_expiry_has_already_passed():
+    dhan = _mock_dhan_client()
+    strategy = IronCondorRollingStrategy()
+    # _within_window_time() is "today" -- an expiry dated yesterday is stale.
+    yesterday = (_within_window_time().date() - timedelta(days=1)).isoformat()
+    ctx = StrategyContext(dhan_client=dhan, params={"expiry": yesterday}, today_run_count=0)
+    with _patched_now(_within_window_time()):
+        assert strategy.evaluate_entry(ctx) is None
 
 
 def test_entry_blocked_before_start_time():
@@ -160,11 +173,36 @@ def test_entry_returns_none_when_buy_offset_not_greater_than_sell_offset():
 # --- whole-run exit ---
 
 
-def test_evaluate_exit_true_at_end_time():
+def test_evaluate_exit_true_at_end_time_on_expiry_day():
     strategy = IronCondorRollingStrategy()
     dhan = MagicMock()
-    ctx = StrategyContext(dhan_client=dhan, params={"end_time": "14:45"})
-    with _patched_now(datetime.now(IST).replace(hour=14, minute=45, second=0, microsecond=0)):
+    expiry_moment = datetime.now(IST).replace(hour=14, minute=45, second=0, microsecond=0)
+    ctx = StrategyContext(dhan_client=dhan, params={"end_time": "14:45", "expiry": expiry_moment.date().isoformat()})
+    with _patched_now(expiry_moment):
+        assert strategy.evaluate_exit(ctx, _condor_notes()) is True
+
+
+def test_evaluate_exit_false_at_end_time_on_a_day_before_expiry():
+    """This is not an intraday strategy -- reaching end_time on any day
+    other than the expiry day itself must NOT force-close the position."""
+    strategy = IronCondorRollingStrategy()
+    dhan = MagicMock()
+    now = datetime.now(IST).replace(hour=14, minute=45, second=0, microsecond=0)
+    future_expiry = (now.date() + timedelta(days=3)).isoformat()
+    ctx = StrategyContext(dhan_client=dhan, params={"end_time": "14:45", "expiry": future_expiry})
+    with _patched_now(now):
+        assert strategy.evaluate_exit(ctx, _condor_notes()) is False
+
+
+def test_evaluate_exit_true_when_expiry_date_has_already_fully_passed():
+    """Safety catch-up: if the expiry day itself was somehow missed, any
+    later day should force-close immediately, not wait for end_time again."""
+    strategy = IronCondorRollingStrategy()
+    dhan = MagicMock()
+    now = datetime.now(IST).replace(hour=9, minute=30, second=0, microsecond=0)  # well before end_time
+    past_expiry = (now.date() - timedelta(days=1)).isoformat()
+    ctx = StrategyContext(dhan_client=dhan, params={"end_time": "14:45", "expiry": past_expiry})
+    with _patched_now(now):
         assert strategy.evaluate_exit(ctx, _condor_notes()) is True
 
 
