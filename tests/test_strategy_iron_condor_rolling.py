@@ -241,6 +241,25 @@ def test_pe_side_touched_rolls_ce_side_only():
     assert roll["leg_state_patch"] == {_pe_id(23650): {"triggered_roll": True}}
 
 
+def test_roll_gap_is_derived_from_the_triggering_sides_own_current_width_not_a_fixed_default():
+    """The gap isn't a separately configured constant — it's the triggering
+    (tested) side's own current wing width. Here the CE spread is 200 wide
+    (not the usual 100), so the untested PE side's new sell strike must
+    land exactly on CES (24450-200=24250, i.e. CES itself), and its new
+    buy strike another 200 beyond that."""
+    strategy = IronCondorRollingStrategy()
+    dhan = _mock_dhan_client(spot=24450.0)
+    notes = _condor_notes(ceb=24450, ces=24250, pes=23750, peb=23650)
+    ctx = StrategyContext(dhan_client=dhan, params={"expiry": "2026-08-27"})
+
+    decision = strategy.evaluate_rolls(ctx, notes)
+
+    assert decision is not None
+    roll = decision["rolls"][0]
+    new_strikes = {leg.transaction_type: int(leg.trading_symbol.split()[1]) for leg in roll["new_legs"]}
+    assert new_strikes == {"SELL": 24250, "BUY": 24050}  # gap = ceb-ces = 200, not the old fixed 100
+
+
 def test_no_roll_when_spot_is_comfortably_inside_the_condor():
     strategy = IronCondorRollingStrategy()
     dhan = _mock_dhan_client(spot=24000.0)

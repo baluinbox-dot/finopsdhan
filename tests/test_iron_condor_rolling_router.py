@@ -73,7 +73,7 @@ def test_admin_can_publish_and_user_can_open_configure_page(client, db_session):
         f"/strategies/{strategy.id}/configure-iron-condor",
         data={
             "underlying": "NIFTY", "expiry_type": "weekly", "expiry": "2026-08-27",
-            "sell_offset_points": 250, "buy_offset_points": 350, "roll_gap_points": 100,
+            "sell_offset_points": 250, "buy_offset_points": 350,
             "sl_target_mode": "fixed", "stop_loss_value": 10000, "target_value": 15000,
         },
         follow_redirects=False,

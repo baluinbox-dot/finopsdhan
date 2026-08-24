@@ -9,15 +9,22 @@ require paying a debit or admitting a directional loss, so it is left
 alone; the untested side is dragged in to collect fresh credit and keep
 the position balanced.
 
-Worked example (spot 24,000, sell_offset=250, buy_offset=350, roll_gap=100):
+The roll gap is not a separate configured number — it's derived live from
+the *triggering* (tested) side's own current wing width (CEB-CES, or
+PEB-PES), so the untested side's new sell strike always lands exactly on
+the tested side's current sell strike, and its new buy strike is that
+same width beyond that.
+
+Worked example (spot 24,000, sell_offset=250, buy_offset=350 -> initial
+CE/PE width both 100):
   Entry: CEB 24350 buy, CES 24250 sell, PES 23750 sell, PEB 23650 buy.
-  Spot rises to touch CEB (24350) -> CE side is *not* touched. The PE side
-    is closed and re-opened one roll_gap below the trigger: new PES =
-    24350-100 = 24250, new PEB = new PES-100 = 24150. CE legs continue
-    unchanged.
-  Spot falls to touch PEB (23650) -> PE side is *not* touched. The CE side
-    rolls symmetrically: new CES = 23650+100 = 23750, new CEB = new
-    CES+100 = 23850.
+  Spot rises to touch CEB (24350) -> CE side is *not* touched. Gap =
+    CEB-CES = 100. The PE side is closed and re-opened: new PES = CEB-gap
+    = 24250 (== the current CES strike), new PEB = new PES-gap = 24150.
+    CE legs continue unchanged.
+  Spot falls to touch PEB (23650) -> PE side is *not* touched. Gap =
+    PES-PEB = 100. The CE side rolls symmetrically: new CES = PEB+gap =
+    23750 (== the current PES strike), new CEB = new CES+gap = 23850.
 
 Each side rolls at most once per distinct value of its own opposite-side
 trigger strike — once PE has rolled in response to a given CEB, it won't
@@ -104,7 +111,6 @@ class IronCondorRollingStrategy(Strategy):
         "end_time": "14:45",
         "sell_offset_points": 250,  # CES/PES strike = spot +/- this
         "buy_offset_points": 350,  # CEB/PEB strike = spot +/- this (must be > sell_offset_points)
-        "roll_gap_points": 100,  # new sell strike = trigger boundary -/+ this; new buy = new sell -/+ this again
         "sl_target_mode": "fixed",  # "fixed" (rupees) | "pct" (of total premium collected today)
         "stop_loss_value": 10000,
         "target_value": 15000,
@@ -271,10 +277,6 @@ class IronCondorRollingStrategy(Strategy):
         if not legs:
             return None
 
-        roll_gap = float(p.get("roll_gap_points") or 0)
-        if roll_gap <= 0:
-            return None
-
         underlying = str(p["underlying"]).upper()
         meta = UNDERLYINGS.get(underlying)
         if meta is None:
@@ -297,13 +299,17 @@ class IronCondorRollingStrategy(Strategy):
             return None  # not a clean 4-leg condor right now — don't guess, leave it alone
 
         ceb = next((leg for leg in ce_legs if leg["transaction_type"] == "BUY"), None)
+        ces = next((leg for leg in ce_legs if leg["transaction_type"] == "SELL"), None)
         peb = next((leg for leg in pe_legs if leg["transaction_type"] == "BUY"), None)
-        if ceb is None or peb is None:
+        pes = next((leg for leg in pe_legs if leg["transaction_type"] == "SELL"), None)
+        if ceb is None or ces is None or peb is None or pes is None:
             return None
 
         ceb_strike = _strike_of(ceb)
+        ces_strike = _strike_of(ces)
         peb_strike = _strike_of(peb)
-        if ceb_strike is None or peb_strike is None:
+        pes_strike = _strike_of(pes)
+        if ceb_strike is None or ces_strike is None or peb_strike is None or pes_strike is None:
             return None
 
         ceb_sid = str(ceb["security_id"])
@@ -346,10 +352,17 @@ class IronCondorRollingStrategy(Strategy):
 
         if trigger_ce_side_touched:
             # CE side reached its outer wing -> roll the PE (untested) side
-            # in, one roll_gap below the CE trigger.
-            new_pes_strike = _nearest_strike(strikes_avail, ceb_strike - roll_gap)
-            new_peb_strike = _nearest_strike(strikes_avail, new_pes_strike - roll_gap)
-            if new_pes_strike != new_peb_strike:
+            # in. The gap is the CE side's own current wing width (CEB-CES)
+            # — not a separately configured number — so the new PES lands
+            # exactly on the current CES strike, and new PEB is that same
+            # width beyond it.
+            ce_gap = ceb_strike - ces_strike
+            if ce_gap > 0:
+                new_pes_strike = _nearest_strike(strikes_avail, ceb_strike - ce_gap)
+                new_peb_strike = _nearest_strike(strikes_avail, new_pes_strike - ce_gap)
+            else:
+                new_pes_strike = new_peb_strike = None  # malformed CE spread — don't guess
+            if ce_gap > 0 and new_pes_strike != new_peb_strike:
                 pes_row = _row(new_pes_strike)
                 peb_row = _row(new_peb_strike)
                 if pes_row is not None and peb_row is not None:
@@ -379,10 +392,16 @@ class IronCondorRollingStrategy(Strategy):
 
         if trigger_pe_side_touched:
             # PE side reached its outer wing -> roll the CE (untested) side
-            # in, one roll_gap above the PE trigger.
-            new_ces_strike = _nearest_strike(strikes_avail, peb_strike + roll_gap)
-            new_ceb_strike = _nearest_strike(strikes_avail, new_ces_strike + roll_gap)
-            if new_ces_strike != new_ceb_strike:
+            # in. The gap is the PE side's own current wing width (PES-PEB)
+            # — so the new CES lands exactly on the current PES strike, and
+            # new CEB is that same width beyond it.
+            pe_gap = pes_strike - peb_strike
+            if pe_gap > 0:
+                new_ces_strike = _nearest_strike(strikes_avail, peb_strike + pe_gap)
+                new_ceb_strike = _nearest_strike(strikes_avail, new_ces_strike + pe_gap)
+            else:
+                new_ces_strike = new_ceb_strike = None  # malformed PE spread — don't guess
+            if pe_gap > 0 and new_ces_strike != new_ceb_strike:
                 ces_row = _row(new_ces_strike)
                 ceb_row = _row(new_ceb_strike)
                 if ces_row is not None and ceb_row is not None:

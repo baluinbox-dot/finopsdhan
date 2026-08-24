@@ -103,29 +103,23 @@
 
             <div class="col-12"><hr></div>
 
-            <div class="col-md-4">
+            <div class="col-md-6">
                 <label class="form-label">Sell Strike Offset (pts)</label>
                 <input type="number" step="1" min="1" name="sell_offset_points" value="{{ params.sell_offset_points }}" class="form-control">
                 <div class="form-text">CES/PES strike = spot &plusmn; this.</div>
             </div>
-            <div class="col-md-4">
+            <div class="col-md-6">
                 <label class="form-label">Buy Wing Offset (pts)</label>
                 <input type="number" step="1" min="1" name="buy_offset_points" value="{{ params.buy_offset_points }}" class="form-control">
                 <div class="form-text">CEB/PEB strike = spot &plusmn; this. Must be greater than the sell offset.</div>
             </div>
-            <div class="col-md-4">
-                <label class="form-label">Roll Gap (pts)</label>
-                <input type="number" step="1" min="1" name="roll_gap_points" value="{{ params.roll_gap_points }}" class="form-control">
-                <div class="form-text">
-                    When the tested side's outer wing is touched, the untested side's new sell strike is placed this
-                    many points from the trigger, and its new buy strike another gap beyond that.
-                </div>
-            </div>
             <div class="col-12 small text-body-secondary">
                 Only the <strong>untested</strong> side ever rolls — when spot reaches the CE buy wing, the PE side
-                closes and re-opens closer to spot while the CE legs continue unchanged; when spot reaches the PE buy
-                wing, the CE side rolls in while the PE legs continue. Each side rolls at most once per trigger — it
-                won't keep re-rolling while spot sits at the same boundary.
+                closes and re-opens: its new sell strike lands exactly on the current CE sell strike, and its new buy
+                strike is that same CEB&minus;CES width beyond it (there's no separate Roll Gap setting — the gap is
+                always the tested side's own current wing width). The CE legs continue unchanged. Symmetrically, when
+                spot reaches the PE buy wing, the CE side rolls in the same way while the PE legs continue. Each side
+                rolls at most once per trigger — it won't keep re-rolling while spot sits at the same boundary.
             </div>
 
             <div class="col-12"><hr></div>
