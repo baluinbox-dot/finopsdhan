@@ -1,0 +1,179 @@
+{% extends "base.html" %}
+{% block title %}Configure {{ strategy.name }} — FinOps Algo{% endblock %}
+{% block content %}
+<h4 class="mb-1">{{ 'Reconfigure: ' ~ (existing.label or strategy.name) if existing else 'Add New Instance: ' ~ strategy.name }}</h4>
+<p class="text-body-secondary">{{ strategy.description }}</p>
+{% if not existing %}
+<p class="small text-body-secondary">
+    This creates a <strong>new, independent instance</strong> — any other instances of this strategy you already have
+    running keep running untouched.
+</p>
+{% endif %}
+
+{% if not has_dhan %}
+<div class="alert alert-warning">
+    Connect your Dhan account on the <a href="{{ url('/settings/dhan') }}">Settings page</a> before configuring this strategy —
+    the expiry and strike info below is fetched live from your own Dhan connection.
+</div>
+{% else %}
+
+<div class="card stat-card mb-3" style="max-width: 720px;">
+    <div class="card-body">
+        <form method="get" action="{{ url('/strategies/' ~ strategy.id ~ '/configure-iron-condor') }}" class="row g-2 align-items-end">
+            <input type="hidden" name="user_strategy_id" value="{{ user_strategy_id }}">
+            <div class="col-auto">
+                <label class="form-label small mb-0">Underlying</label>
+                <select name="underlying" class="form-select form-select-sm" onchange="this.form.submit()">
+                    {% for key, meta in underlyings.items() %}
+                    <option value="{{ key }}" {{ 'selected' if key == selected_underlying else '' }}>{{ meta.label }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-auto">
+                <label class="form-label small mb-0">Expiry Type</label>
+                <select name="expiry_type" class="form-select form-select-sm" onchange="this.form.submit()">
+                    <option value="weekly" {{ 'selected' if selected_expiry_type == 'weekly' else '' }}>Weekly</option>
+                    <option value="monthly" {{ 'selected' if selected_expiry_type == 'monthly' else '' }}>Monthly</option>
+                </select>
+            </div>
+            <div class="col-auto">
+                <label class="form-label small mb-0">Expiry</label>
+                <select name="expiry" class="form-select form-select-sm" onchange="this.form.submit()" {{ 'disabled' if not expiries else '' }}>
+                    {% for exp in expiries %}
+                    <option value="{{ exp }}" {{ 'selected' if exp == selected_expiry else '' }}>{{ exp }}</option>
+                    {% else %}
+                    <option>No {{ selected_expiry_type }} expiries available</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-auto">
+                <button class="btn btn-outline-secondary btn-sm" type="submit">Refresh Strikes</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+{% if expiry_error %}
+<div class="alert alert-danger">{{ expiry_error }}</div>
+{% endif %}
+
+{% if condor_preview %}
+<div class="alert alert-info">
+    Spot <strong>{{ '%.2f'|format(condor_preview.spot) }}</strong> — at these offsets, the initial condor would be
+    CEB (buy) <strong>{{ condor_preview.ceb | int }}</strong>, CES (sell) <strong>{{ condor_preview.ces | int }}</strong>,
+    PES (sell) <strong>{{ condor_preview.pes | int }}</strong>, PEB (buy) <strong>{{ condor_preview.peb | int }}</strong>.
+    This uses the Sell/Buy Offset values below — change them and refresh to see the condor at different strikes.
+</div>
+{% endif %}
+
+<div class="card stat-card" style="max-width: 720px;">
+    <div class="card-body">
+        <form method="post" action="{{ url('/strategies/' ~ strategy.id ~ '/configure-iron-condor') }}" class="row g-3">
+            <input type="hidden" name="user_strategy_id" value="{{ user_strategy_id }}">
+            <input type="hidden" name="underlying" value="{{ selected_underlying }}">
+            <input type="hidden" name="expiry_type" value="{{ selected_expiry_type }}">
+            <input type="hidden" name="expiry" value="{{ selected_expiry }}">
+
+            <div class="col-12">
+                <div class="small text-body-secondary mb-1">
+                    {{ underlyings[selected_underlying].label }} · Iron Condor · untested-side rolling ·
+                    {{ selected_expiry_type }} · {{ selected_expiry or 'no expiry selected' }}
+                </div>
+            </div>
+
+            <div class="col-12">
+                <label class="form-label">Instance Name</label>
+                <input type="text" name="label" value="{{ existing.label if existing else '' }}" maxlength="120"
+                       class="form-control" placeholder="e.g. NIFTY Iron Condor — auto-generated if left blank">
+            </div>
+
+            <div class="col-md-4">
+                <label class="form-label">Lots</label>
+                <input type="number" name="lots" min="1" value="{{ params.lots }}" class="form-control">
+            </div>
+            <div class="col-md-4">
+                <label class="form-label">Start Time</label>
+                <input type="time" name="start_time" value="{{ params.start_time }}" class="form-control">
+            </div>
+            <div class="col-md-4">
+                <label class="form-label">End Time</label>
+                <input type="time" name="end_time" value="{{ params.end_time }}" class="form-control">
+                <div class="form-text">Every leg force-closes here; no new orders or rolls after.</div>
+            </div>
+
+            <div class="col-12"><hr></div>
+
+            <div class="col-md-4">
+                <label class="form-label">Sell Strike Offset (pts)</label>
+                <input type="number" step="1" min="1" name="sell_offset_points" value="{{ params.sell_offset_points }}" class="form-control">
+                <div class="form-text">CES/PES strike = spot &plusmn; this.</div>
+            </div>
+            <div class="col-md-4">
+                <label class="form-label">Buy Wing Offset (pts)</label>
+                <input type="number" step="1" min="1" name="buy_offset_points" value="{{ params.buy_offset_points }}" class="form-control">
+                <div class="form-text">CEB/PEB strike = spot &plusmn; this. Must be greater than the sell offset.</div>
+            </div>
+            <div class="col-md-4">
+                <label class="form-label">Roll Gap (pts)</label>
+                <input type="number" step="1" min="1" name="roll_gap_points" value="{{ params.roll_gap_points }}" class="form-control">
+                <div class="form-text">
+                    When the tested side's outer wing is touched, the untested side's new sell strike is placed this
+                    many points from the trigger, and its new buy strike another gap beyond that.
+                </div>
+            </div>
+            <div class="col-12 small text-body-secondary">
+                Only the <strong>untested</strong> side ever rolls — when spot reaches the CE buy wing, the PE side
+                closes and re-opens closer to spot while the CE legs continue unchanged; when spot reaches the PE buy
+                wing, the CE side rolls in while the PE legs continue. Each side rolls at most once per trigger — it
+                won't keep re-rolling while spot sits at the same boundary.
+            </div>
+
+            <div class="col-12"><hr></div>
+
+            <div class="col-md-4">
+                <label class="form-label">Stop-Loss / Target Basis</label>
+                <select name="sl_target_mode" class="form-select">
+                    <option value="fixed" {{ 'selected' if params.sl_target_mode == 'fixed' else '' }}>Fixed &#8377;</option>
+                    <option value="pct" {{ 'selected' if params.sl_target_mode == 'pct' else '' }}>% of Total Premium Collected</option>
+                </select>
+                <div class="form-text">
+                    "% of Total Premium Collected" is measured against the running net credit collected across the
+                    initial entry plus every roll so far today.
+                </div>
+            </div>
+            <div class="col-md-4">
+                <label class="form-label">Stop-Loss</label>
+                <input type="number" step="1" name="stop_loss_value" value="{{ params.stop_loss_value }}" class="form-control">
+                <div class="form-text">Rupees or %, per the basis above. 0 disables it.</div>
+            </div>
+            <div class="col-md-4">
+                <label class="form-label">Target</label>
+                <input type="number" step="1" name="target_value" value="{{ params.target_value }}" class="form-control">
+                <div class="form-text">Rupees or %, per the basis above. 0 disables it.</div>
+            </div>
+            <div class="col-12 small text-body-secondary">
+                Checked continuously against the <strong>combined</strong> live P&amp;L across everything still open
+                plus everything already realized today — whichever hits first closes every remaining leg and stops
+                the strategy for the rest of the day.
+            </div>
+
+            <div class="col-12"><hr></div>
+
+            <div class="col-12">
+                <label class="form-label">Mode</label>
+                <select name="mode" class="form-select">
+                    <option value="paper" selected>Paper (simulated)</option>
+                    <option value="live">Live</option>
+                </select>
+            </div>
+
+            <div class="col-12 mt-2">
+                <button id="configureSubmitBtn" class="btn btn-primary w-100" type="submit" {{ 'disabled' if not selected_expiry else '' }}>
+                    {{ 'Update Configuration' if existing else 'Save and Enable' }}
+                </button>
+            </div>
+        </form>
+    </div>
+</div>
+{% endif %}
+{% endblock %}
