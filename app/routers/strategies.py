@@ -1294,7 +1294,6 @@ def configure_iron_condor_submit(
     end_time: str = Form("14:45"),
     sell_offset_points: float = Form(250),
     buy_offset_points: float = Form(350),
-    roll_gap_points: float = Form(100),
     sl_target_mode: str = Form("fixed"),
     stop_loss_value: float = Form(10000),
     target_value: float = Form(15000),
@@ -1327,13 +1326,6 @@ def configure_iron_condor_submit(
             redirect_url += f"&user_strategy_id={user_strategy_id}"
         return RedirectResponse(url(redirect_url), status_code=303)
 
-    if roll_gap_points <= 0:
-        flash(request, "Roll Gap must be greater than zero.", "error")
-        redirect_url = f"/strategies/{strategy_id}/configure-iron-condor?underlying={underlying}&expiry={expiry}"
-        if user_strategy_id:
-            redirect_url += f"&user_strategy_id={user_strategy_id}"
-        return RedirectResponse(url(redirect_url), status_code=303)
-
     requested_mode = StrategyMode.LIVE if mode == "live" else StrategyMode.PAPER
     if requested_mode == StrategyMode.LIVE:
         flash(
@@ -1354,7 +1346,6 @@ def configure_iron_condor_submit(
         "end_time": end_time,
         "sell_offset_points": sell_offset_points,
         "buy_offset_points": buy_offset_points,
-        "roll_gap_points": roll_gap_points,
         "sl_target_mode": "pct" if sl_target_mode == "pct" else "fixed",
         "stop_loss_value": stop_loss_value,
         "target_value": target_value,
