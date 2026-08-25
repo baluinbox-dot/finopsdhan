@@ -61,10 +61,19 @@
                 if (!priceCell) return;
 
                 const pctCell = document.querySelector(`[data-pct-cell="${key}"]`);
+                const legPnlCell = document.querySelector(`[data-pnl-cell="${key}"]`);
 
                 if (leg.current_price === null || leg.current_price === undefined) {
                     priceCell.textContent = 'pricing…';
                     if (pctCell) pctCell.textContent = '—';
+                    // A quote fetch failing later must not leave a stale
+                    // number sitting under "Live P&L" claiming to still be
+                    // current — reset it the same way, not just the price.
+                    if (legPnlCell) {
+                        legPnlCell.textContent = 'pricing…';
+                        legPnlCell.classList.remove('text-success', 'text-danger');
+                        legPnlCell.classList.add('text-body-secondary');
+                    }
                     return;
                 }
                 priceCell.textContent = leg.current_price.toFixed(2);
@@ -83,14 +92,13 @@
                     pctCell.classList.add(pct > 0 ? 'text-success' : pct < 0 ? 'text-danger' : 'text-body-secondary');
                 }
 
-                const pnlCell = document.querySelector(`[data-pnl-cell="${key}"]`);
-                if (pnlCell && !Number.isNaN(entryPrice) && !Number.isNaN(qty)) {
+                if (legPnlCell && !Number.isNaN(entryPrice) && !Number.isNaN(qty)) {
                     const perUnit = priceCell.dataset.side === 'SELL'
                         ? (entryPrice - leg.current_price)
                         : (leg.current_price - entryPrice);
                     const legPnl = perUnit * qty;
-                    pnlCell.textContent = formatRupees(legPnl);
-                    applyColor(pnlCell, legPnl);
+                    legPnlCell.textContent = formatRupees(legPnl);
+                    applyColor(legPnlCell, legPnl);
                 }
             });
         });
