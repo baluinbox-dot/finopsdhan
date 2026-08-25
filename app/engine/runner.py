@@ -6,7 +6,9 @@ rather than trusted to individual strategies:
   - every new UserStrategy starts in paper mode (enforced at the router)
   - live orders require BOTH `user_strategy.mode == LIVE` AND the
     `ALLOW_LIVE_TRADING` master switch to be true
-  - LIMIT orders only — never MARKET
+  - LIMIT by default; MARKET only when a strategy instance's own
+    `order_type` param is explicitly set to it (Balu's explicit choice,
+    see `app.strategies.base.resolve_order_type` — no price protection)
   - lot size is taken from the security master via the strategy itself,
     never hardcoded here
   - every order preview is logged before being placed
@@ -88,6 +90,11 @@ def _place_or_paper_leg(
     status = OrderStatus.PAPER_FILLED
 
     if is_live:
+        # A MARKET order carries no price at all -- leg.price (the last-seen
+        # LTP) stays on the OrderLeg/Order record itself for paper-fill and
+        # P&L math regardless of order_type; only the actual live API call
+        # zeroes it out, matching Dhan's own MARKET semantics.
+        live_price = 0.0 if leg.order_type == "MARKET" else leg.price
         response = dhan_client.place_order(
             security_id=leg.security_id,
             exchange_segment=leg.exchange_segment,
@@ -95,7 +102,7 @@ def _place_or_paper_leg(
             quantity=leg.quantity,
             order_type=leg.order_type,
             product_type=leg.product_type,
-            price=leg.price,
+            price=live_price,
         )
         if response.get("status") == "success":
             dhan_order_id = response.get("data", {}).get("orderId")

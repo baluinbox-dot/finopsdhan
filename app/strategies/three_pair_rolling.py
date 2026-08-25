@@ -54,7 +54,7 @@ from app.dhan.helpers import (
     find_strike_by_nearest_premium,
     get_lot_size,
 )
-from app.strategies.base import OrderLeg, Strategy, StrategyContext, leg_pnl
+from app.strategies.base import OrderLeg, Strategy, StrategyContext, leg_pnl, resolve_order_type
 
 IST = ZoneInfo("Asia/Kolkata")
 
@@ -117,10 +117,12 @@ class ThreePairRollingStrategy(Strategy):
         "daily_target": 15000,
         "hedge_enabled": False,
         "hedge_premium_target": 5,  # buy the closest-premium CE/PE hedge to this price
+        "order_type": "LIMIT",  # "LIMIT" (safe default) or "MARKET" (no price protection)
     }
 
     def evaluate_entry(self, ctx: StrategyContext) -> list[OrderLeg] | None:
         p = {**self.default_params, **ctx.params}
+        order_type = resolve_order_type(p)
 
         now_ist = _now_ist()
         start_time = _parse_hhmm(p["start_time"])
@@ -183,7 +185,7 @@ class ThreePairRollingStrategy(Strategy):
                 exchange_segment=meta["option_segment"],
                 transaction_type="SELL",
                 quantity=quantity,
-                order_type="LIMIT",
+                order_type=order_type,
                 product_type="INTRADAY",
                 price=float(row["ce_ltp"]),
                 role="primary",
@@ -195,7 +197,7 @@ class ThreePairRollingStrategy(Strategy):
                 exchange_segment=meta["option_segment"],
                 transaction_type="SELL",
                 quantity=quantity,
-                order_type="LIMIT",
+                order_type=order_type,
                 product_type="INTRADAY",
                 price=float(row["pe_ltp"]),
                 role="primary",
@@ -225,7 +227,7 @@ class ThreePairRollingStrategy(Strategy):
                     exchange_segment=meta["option_segment"],
                     transaction_type="BUY",
                     quantity=hedge_quantity,
-                    order_type="LIMIT",
+                    order_type=order_type,
                     product_type="INTRADAY",
                     price=float(best_row[price_col]),
                     role="hedge",
@@ -279,6 +281,7 @@ class ThreePairRollingStrategy(Strategy):
 
     def evaluate_rolls(self, ctx: StrategyContext, open_run_notes: dict[str, Any]) -> dict[str, Any] | None:
         p = {**self.default_params, **ctx.params}
+        order_type = resolve_order_type(p)
         legs = open_run_notes.get("legs") or []
         if not legs:
             return None
@@ -373,13 +376,13 @@ class ThreePairRollingStrategy(Strategy):
                 OrderLeg(
                     label=f"{role} SELL {int(target)} CE ({expiry})", security_id=str(row["ce_security_id"]),
                     trading_symbol=f"{underlying} {int(target)} CE {expiry}", exchange_segment=meta["option_segment"],
-                    transaction_type="SELL", quantity=quantity, order_type="LIMIT", product_type="INTRADAY",
+                    transaction_type="SELL", quantity=quantity, order_type=order_type, product_type="INTRADAY",
                     price=float(row["ce_ltp"]), role="primary",
                 ),
                 OrderLeg(
                     label=f"{role} SELL {int(target)} PE ({expiry})", security_id=str(row["pe_security_id"]),
                     trading_symbol=f"{underlying} {int(target)} PE {expiry}", exchange_segment=meta["option_segment"],
-                    transaction_type="SELL", quantity=quantity, order_type="LIMIT", product_type="INTRADAY",
+                    transaction_type="SELL", quantity=quantity, order_type=order_type, product_type="INTRADAY",
                     price=float(row["pe_ltp"]), role="primary",
                 ),
             ]

@@ -68,7 +68,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from app.dhan.helpers import UNDERLYINGS, fetch_chain_df, fetch_quotes, fetch_spot_price, get_lot_size
-from app.strategies.base import OrderLeg, Strategy, StrategyContext, leg_pnl
+from app.strategies.base import OrderLeg, Strategy, StrategyContext, leg_pnl, resolve_order_type
 
 IST = ZoneInfo("Asia/Kolkata")
 
@@ -125,12 +125,14 @@ class IronCondorRollingStrategy(Strategy):
         "sl_target_mode": "fixed",  # "fixed" (rupees) | "pct" (of total premium collected this run so far)
         "stop_loss_value": 10000,
         "target_value": 15000,
+        "order_type": "LIMIT",  # "LIMIT" (safe default) or "MARKET" (no price protection)
     }
 
     # --- entry: 4 legs picked by fixed point offsets from spot ---
 
     def evaluate_entry(self, ctx: StrategyContext) -> list[OrderLeg] | None:
         p = {**self.default_params, **ctx.params}
+        order_type = resolve_order_type(p)
 
         now_ist = _now_ist()
         start_time = _parse_hhmm(p["start_time"])
@@ -216,7 +218,7 @@ class IronCondorRollingStrategy(Strategy):
                 exchange_segment=meta["option_segment"],
                 transaction_type=txn,
                 quantity=quantity,
-                order_type="LIMIT",
+                order_type=order_type,
                 product_type="MARGIN",  # carried forward across days, NOT auto-squared-off intraday by the broker
                 price=float(row[price_col]),
                 role="primary",
@@ -305,6 +307,7 @@ class IronCondorRollingStrategy(Strategy):
 
     def evaluate_rolls(self, ctx: StrategyContext, open_run_notes: dict[str, Any]) -> dict[str, Any] | None:
         p = {**self.default_params, **ctx.params}
+        order_type = resolve_order_type(p)
         legs = open_run_notes.get("legs") or []
         if not legs:
             return None
@@ -404,13 +407,13 @@ class IronCondorRollingStrategy(Strategy):
                         OrderLeg(
                             label=f"ROLL PES SELL {int(new_pes_strike)} PE ({expiry})", security_id=str(pes_row["pe_security_id"]),
                             trading_symbol=f"{underlying} {int(new_pes_strike)} PE {expiry}", exchange_segment=meta["option_segment"],
-                            transaction_type="SELL", quantity=quantity, order_type="LIMIT", product_type="MARGIN",
+                            transaction_type="SELL", quantity=quantity, order_type=order_type, product_type="MARGIN",
                             price=float(pes_row["pe_ltp"]), role="primary", pair_id="PE",
                         ),
                         OrderLeg(
                             label=f"ROLL PEB BUY {int(new_peb_strike)} PE ({expiry})", security_id=str(peb_row["pe_security_id"]),
                             trading_symbol=f"{underlying} {int(new_peb_strike)} PE {expiry}", exchange_segment=meta["option_segment"],
-                            transaction_type="BUY", quantity=quantity, order_type="LIMIT", product_type="MARGIN",
+                            transaction_type="BUY", quantity=quantity, order_type=order_type, product_type="MARGIN",
                             price=float(peb_row["pe_ltp"]), role="primary", pair_id="PE",
                         ),
                     ]
@@ -443,13 +446,13 @@ class IronCondorRollingStrategy(Strategy):
                         OrderLeg(
                             label=f"ROLL CES SELL {int(new_ces_strike)} CE ({expiry})", security_id=str(ces_row["ce_security_id"]),
                             trading_symbol=f"{underlying} {int(new_ces_strike)} CE {expiry}", exchange_segment=meta["option_segment"],
-                            transaction_type="SELL", quantity=quantity, order_type="LIMIT", product_type="MARGIN",
+                            transaction_type="SELL", quantity=quantity, order_type=order_type, product_type="MARGIN",
                             price=float(ces_row["ce_ltp"]), role="primary", pair_id="CE",
                         ),
                         OrderLeg(
                             label=f"ROLL CEB BUY {int(new_ceb_strike)} CE ({expiry})", security_id=str(ceb_row["ce_security_id"]),
                             trading_symbol=f"{underlying} {int(new_ceb_strike)} CE {expiry}", exchange_segment=meta["option_segment"],
-                            transaction_type="BUY", quantity=quantity, order_type="LIMIT", product_type="MARGIN",
+                            transaction_type="BUY", quantity=quantity, order_type=order_type, product_type="MARGIN",
                             price=float(ceb_row["ce_ltp"]), role="primary", pair_id="CE",
                         ),
                     ]

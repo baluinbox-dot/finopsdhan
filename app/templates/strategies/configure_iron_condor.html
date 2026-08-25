@@ -161,6 +161,14 @@
             <div class="col-12"><hr></div>
 
             <div class="col-12">
+                <label class="form-label">Order Type</label>
+                <select name="order_type" class="form-select">
+                    <option value="LIMIT" {{ 'selected' if params.order_type != 'MARKET' else '' }}>Limit (safe default — no fill if price moves away)</option>
+                    <option value="MARKET" {{ 'selected' if params.order_type == 'MARKET' else '' }}>Market (fills immediately, no price protection)</option>
+                </select>
+            </div>
+
+            <div class="col-12">
                 <label class="form-label">Mode</label>
                 <select name="mode" class="form-select">
                     <option value="paper" selected>Paper (simulated)</option>

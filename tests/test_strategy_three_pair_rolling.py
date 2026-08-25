@@ -130,6 +130,30 @@ def test_entry_tags_legs_with_the_underlyings_own_derivative_segment():
         assert sides == {"CE", "PE"}
 
 
+def test_entry_defaults_to_limit_orders():
+    dhan = _mock_dhan_client(spot=24400.0)
+    ctx = StrategyContext(dhan_client=dhan, params={"expiry": "2026-08-27", "strike_gap": 50}, today_run_count=0)
+    strategy = ThreePairRollingStrategy()
+    with patch("app.strategies.three_pair_rolling._now_ist", return_value=_within_window_time()):
+        legs = strategy.evaluate_entry(ctx)
+    assert legs is not None
+    assert all(leg.order_type == "LIMIT" for leg in legs)
+
+
+def test_entry_honors_market_order_type_when_configured():
+    dhan = _mock_dhan_client(spot=24400.0)
+    ctx = StrategyContext(
+        dhan_client=dhan,
+        params={"expiry": "2026-08-27", "strike_gap": 50, "order_type": "MARKET"},
+        today_run_count=0,
+    )
+    strategy = ThreePairRollingStrategy()
+    with patch("app.strategies.three_pair_rolling._now_ist", return_value=_within_window_time()):
+        legs = strategy.evaluate_entry(ctx)
+    assert legs is not None
+    assert all(leg.order_type == "MARKET" for leg in legs)
+
+
 def test_entry_blocked_before_start_time():
     dhan = _mock_dhan_client()
     ctx = StrategyContext(dhan_client=dhan, params={"expiry": "2026-08-27"}, today_run_count=0)
@@ -273,6 +297,18 @@ def test_downward_shift_closes_top_opens_new_bottom():
     assert set(roll["close_security_ids"]) == {_ce_id(24450), _pe_id(24450)}  # old T closed
     new_strikes = {int(leg.trading_symbol.split()[1]) for leg in roll["new_legs"]}
     assert new_strikes == {24300}  # new B = old B - gap
+
+
+def test_roll_honors_market_order_type_when_configured():
+    strategy = ThreePairRollingStrategy()
+    dhan = _mock_dhan_client(spot=24350.0)
+    ctx = StrategyContext(dhan_client=dhan, params={"expiry": "2026-08-27", "strike_gap": 50, "order_type": "MARKET"})
+
+    decision = strategy.evaluate_rolls(ctx, _window_notes())
+
+    assert decision is not None
+    roll = decision["rolls"][0]
+    assert all(leg.order_type == "MARKET" for leg in roll["new_legs"])
 
 
 def test_upward_shift_closes_bottom_opens_new_top():

@@ -77,6 +77,7 @@ def enable_strategy(
     strike_offset_points: int = Form(200),
     stop_loss_pct: int = Form(30),
     target_pct: int = Form(50),
+    order_type: str = Form("LIMIT"),
     mode: str = Form("paper"),
 ):
     strategy = db.get(Strategy, strategy_id)
@@ -104,6 +105,7 @@ def enable_strategy(
         "strike_offset_points": strike_offset_points,
         "stop_loss_pct": stop_loss_pct,
         "target_pct": target_pct,
+        "order_type": "MARKET" if order_type == "MARKET" else "LIMIT",
     }
 
     existing = db.scalar(
@@ -292,6 +294,7 @@ def configure_strategy_submit(
     hedge_premium_target: float = Form(0),
     window_start: str = Form("09:15"),
     window_end: str = Form("15:15"),
+    order_type: str = Form("LIMIT"),
     mode: str = Form("paper"),
 ):
     strategy = db.get(Strategy, strategy_id)
@@ -347,6 +350,7 @@ def configure_strategy_submit(
         "hedge_premium_target": hedge_premium_target,
         "window_start": window_start,
         "window_end": window_end,
+        "order_type": "MARKET" if order_type == "MARKET" else "LIMIT",
     }
 
     # Editing an existing instance (user_strategy_id was passed, e.g. from
@@ -637,6 +641,7 @@ def configure_rolling_submit(
     daily_target: float = Form(15000),
     hedge_enabled: bool = Form(False),
     hedge_premium_target: float = Form(5),
+    order_type: str = Form("LIMIT"),
     mode: str = Form("paper"),
 ):
     strategy = db.get(Strategy, strategy_id)
@@ -688,6 +693,7 @@ def configure_rolling_submit(
         "daily_target": daily_target,
         "hedge_enabled": hedge_enabled,
         "hedge_premium_target": hedge_premium_target,
+        "order_type": "MARKET" if order_type == "MARKET" else "LIMIT",
     }
 
     existing: UserStrategy | None = None
@@ -849,6 +855,7 @@ def configure_straddle_submit(
     target_pct: float = Form(80),
     hedge_enabled: bool = Form(False),
     hedge_premium_target: float = Form(5),
+    order_type: str = Form("LIMIT"),
     mode: str = Form("paper"),
 ):
     strategy = db.get(Strategy, strategy_id)
@@ -903,6 +910,7 @@ def configure_straddle_submit(
         "target_pct": target_pct,
         "hedge_enabled": hedge_enabled,
         "hedge_premium_target": hedge_premium_target,
+        "order_type": "MARKET" if order_type == "MARKET" else "LIMIT",
     }
 
     existing: UserStrategy | None = None
@@ -1062,6 +1070,7 @@ def configure_rolling_legsl_submit(
     daily_target: float = Form(15000),
     hedge_enabled: bool = Form(False),
     hedge_premium_target: float = Form(5),
+    order_type: str = Form("LIMIT"),
     mode: str = Form("paper"),
 ):
     strategy = db.get(Strategy, strategy_id)
@@ -1132,6 +1141,7 @@ def configure_rolling_legsl_submit(
         "daily_target": daily_target,
         "hedge_enabled": hedge_enabled,
         "hedge_premium_target": hedge_premium_target,
+        "order_type": "MARKET" if order_type == "MARKET" else "LIMIT",
     }
 
     existing: UserStrategy | None = None
@@ -1297,6 +1307,7 @@ def configure_iron_condor_submit(
     sl_target_mode: str = Form("fixed"),
     stop_loss_value: float = Form(10000),
     target_value: float = Form(15000),
+    order_type: str = Form("LIMIT"),
     mode: str = Form("paper"),
 ):
     strategy = db.get(Strategy, strategy_id)
@@ -1349,6 +1360,7 @@ def configure_iron_condor_submit(
         "sl_target_mode": "pct" if sl_target_mode == "pct" else "fixed",
         "stop_loss_value": stop_loss_value,
         "target_value": target_value,
+        "order_type": "MARKET" if order_type == "MARKET" else "LIMIT",
     }
 
     existing: UserStrategy | None = None

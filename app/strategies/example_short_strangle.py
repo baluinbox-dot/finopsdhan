@@ -13,7 +13,7 @@ from __future__ import annotations
 from typing import Any
 
 from app.dhan.helpers import fetch_chain_df, fetch_expiry_list, fetch_quotes, get_lot_size
-from app.strategies.base import OrderLeg, Strategy, StrategyContext
+from app.strategies.base import OrderLeg, Strategy, StrategyContext, resolve_order_type
 
 
 class ExampleShortStrangle(Strategy):
@@ -31,10 +31,12 @@ class ExampleShortStrangle(Strategy):
         "stop_loss_pct": 30,  # exit if combined premium rises 30% (loss for a seller)
         "target_pct": 50,     # exit if combined premium falls 50% (profit for a seller)
         "product_type": "INTRADAY",
+        "order_type": "LIMIT",  # "LIMIT" (safe default) or "MARKET" (no price protection)
     }
 
     def evaluate_entry(self, ctx: StrategyContext) -> list[OrderLeg] | None:
         p = {**self.default_params, **ctx.params}
+        order_type = resolve_order_type(p)
 
         expiry_data = fetch_expiry_list(
             ctx.dhan_client,
@@ -82,7 +84,7 @@ class ExampleShortStrangle(Strategy):
                 exchange_segment="NSE_FNO",
                 transaction_type="SELL",
                 quantity=quantity,
-                order_type="LIMIT",
+                order_type=order_type,
                 product_type=p["product_type"],
                 price=float(ce_row["ce_ltp"] or 0),
             ),
@@ -93,7 +95,7 @@ class ExampleShortStrangle(Strategy):
                 exchange_segment="NSE_FNO",
                 transaction_type="SELL",
                 quantity=quantity,
-                order_type="LIMIT",
+                order_type=order_type,
                 product_type=p["product_type"],
                 price=float(pe_row["pe_ltp"] or 0),
             ),

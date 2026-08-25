@@ -30,7 +30,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from app.dhan.helpers import UNDERLYINGS, fetch_chain_df, fetch_quotes, find_strike_by_nearest_premium, get_lot_size
-from app.strategies.base import OrderLeg, Strategy, StrategyContext
+from app.strategies.base import OrderLeg, Strategy, StrategyContext, resolve_order_type
 
 IST = ZoneInfo("Asia/Kolkata")
 
@@ -86,10 +86,12 @@ class ATMStraddleTriggerHedge(Strategy):
         "target_pct": 80,  # exit everything once combined premium falls this % from entry
         "hedge_enabled": True,
         "hedge_premium_target": 5,  # buy the closest-premium CE/PE hedge to this price
+        "order_type": "LIMIT",  # "LIMIT" (safe default) or "MARKET" (no price protection)
     }
 
     def evaluate_entry(self, ctx: StrategyContext) -> list[OrderLeg] | None:
         p = {**self.default_params, **ctx.params}
+        order_type = resolve_order_type(p)
 
         now_ist = _now_ist()
         entry_time = _parse_hhmm(p["entry_time"])
@@ -157,7 +159,7 @@ class ATMStraddleTriggerHedge(Strategy):
                 exchange_segment=meta["option_segment"],
                 transaction_type="SELL",
                 quantity=quantity,
-                order_type="LIMIT",
+                order_type=order_type,
                 product_type="INTRADAY",
                 price=float(ce_price),
                 role="primary",
@@ -169,7 +171,7 @@ class ATMStraddleTriggerHedge(Strategy):
                 exchange_segment=meta["option_segment"],
                 transaction_type="SELL",
                 quantity=quantity,
-                order_type="LIMIT",
+                order_type=order_type,
                 product_type="INTRADAY",
                 price=float(pe_price),
                 role="primary",
@@ -195,7 +197,7 @@ class ATMStraddleTriggerHedge(Strategy):
                         exchange_segment=meta["option_segment"],
                         transaction_type="BUY",
                         quantity=quantity,
-                        order_type="LIMIT",
+                        order_type=order_type,
                         product_type="INTRADAY",
                         price=float(best_row[price_col]),
                         role="hedge",
