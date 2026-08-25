@@ -24,11 +24,13 @@ get_settings.cache_clear()
 @pytest.fixture(autouse=True)
 def _no_option_chain_throttle(monkeypatch):
     # app.dhan.helpers throttles real option_chain calls to 1 per 3s
-    # (Dhan's actual rate limit) via module-level state shared across the
-    # whole process. Tests mock the Dhan client, so there's no real limit to
-    # respect — without this, that global state serializes every test that
-    # touches fetch_chain_df behind a real 3-second sleep.
-    monkeypatch.setattr("app.dhan.helpers._throttle_option_chain", lambda: None)
+    # (Dhan's actual rate limit), per Dhan account (state keyed by
+    # _client_key — see app/dhan/helpers.py). Tests mock the Dhan client,
+    # so there's no real limit to respect — patch the interval itself to 0
+    # rather than the throttle function, so the real per-account
+    # throttle/backoff logic still runs (never sleeps at interval 0) instead
+    # of being bypassed outright.
+    monkeypatch.setattr("app.dhan.helpers._OPTION_CHAIN_MIN_INTERVAL_SECONDS", 0)
 
 
 @pytest.fixture()

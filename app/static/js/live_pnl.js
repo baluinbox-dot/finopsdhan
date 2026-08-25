@@ -3,13 +3,16 @@
  * total in place — no full page reload.
  *
  * Not literally "every second": Dhan's quote API is rate-limited to
- * 1 request/sec for the whole account, and this endpoint already batches
- * every leg of every open position into as few quote_data calls as
- * possible per poll. Polling faster than a couple of seconds just burns
- * that budget for no visible benefit — 3s is a safe, still-snappy default.
+ * 1 request/sec per account, and this endpoint already batches every leg
+ * of every open position into as few quote_data calls as possible per
+ * poll. Polling faster than a few seconds just burns that budget for no
+ * visible benefit and competes with the background scheduler's own quote
+ * calls for the same account (see app/dhan/helpers.py's per-account
+ * throttle) — 5s (widened from 3s on 2026-08-25, after a real sustained
+ * 429 outage) is a still-snappy default with more headroom.
  */
 (function () {
-    const POLL_INTERVAL_MS = 3000;
+    const POLL_INTERVAL_MS = 5000;
     let timer = null;
 
     function formatRupees(value) {
