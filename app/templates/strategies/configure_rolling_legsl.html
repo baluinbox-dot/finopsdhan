@@ -186,6 +186,12 @@
                     <option value="live">Live</option>
                 </select>
             </div>
+            <div class="col-12 form-check">
+                <input type="checkbox" class="form-check-input" id="liveConfirmed" name="live_confirmed" value="true">
+                <label class="form-check-label text-danger" for="liveConfirmed">
+                    I understand Live mode places real orders with real money on my connected Dhan account. Required to actually go live — otherwise this stays in Paper mode regardless of the Mode selected above.
+                </label>
+            </div>
 
             <div class="col-12 mt-2">
                 <button id="configureSubmitBtn" class="btn btn-primary w-100" type="submit" {{ 'disabled' if not selected_expiry else '' }}>
