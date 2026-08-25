@@ -125,44 +125,48 @@ def _call_with_retry(fn: Callable[[], Any], *, attempts: int = 2, base_delay: fl
     raise last_exc
 
 
-def _throttle_option_chain(dhan_client: Any) -> dict[str, Any]:
-    """Waits out this account's own option-chain pacing (base interval x
-    its current backoff multiplier) and returns its throttle state —
-    pass this to `_note_option_chain_result` once the call's outcome is
-    known, so a real failure widens this account's own spacing without
-    affecting any other account."""
-    state = _throttle_state(_option_chain_state, _client_key(dhan_client))
+def _throttled_call(registry: dict[str, dict[str, Any]], dhan_client: Any, base_interval: float, fn: Callable[[], Any]) -> Any:
+    """Runs one Dhan API call (`fn`) fully serialized against every other
+    call for the same Dhan account *and* the same call family (option-chain
+    vs quote/ticker — a separate `registry` each) — holding this account's
+    lock across the network round trip itself, not just the pacing wait
+    before it starts.
+
+    That matters: an earlier version released the lock right after the
+    wait and before making the actual call, so a second concurrent thread
+    (the scheduler evaluates several of one account's strategies in
+    parallel — see app/engine/scheduler.py) could acquire the lock and
+    compute its own wait from the backoff multiplier as it stood *before*
+    the first call's outcome was known — several threads could all queue
+    up on the same stale, too-low backoff before any of their results came
+    back, defeating the point of backing off during a real outage.
+    Confirmed live 2026-08-25: even with backoff added, failures kept
+    landing within ~1s of each other instead of the intended widening
+    gap. Serializing the whole call (wait, request, and the resulting
+    backoff update) closes that race outright — losing a little
+    throughput here is moot anyway while the account is being rate-limited.
+
+    `fn` must return the raw Dhan response dict or raise — a non-"success"
+    `status` counts as a failure the same as an exception does, both back
+    this account's *next* call off; any other return shape is left to the
+    caller to validate further (e.g. "does this dict have the keys I
+    expect"), that's not this function's concern."""
+    state = _throttle_state(registry, _client_key(dhan_client))
     with state["lock"]:
-        interval = _OPTION_CHAIN_MIN_INTERVAL_SECONDS * state["backoff"]
+        interval = base_interval * state["backoff"]
         wait = interval - (time.monotonic() - state["last_call_at"])
         if wait > 0:
             time.sleep(wait)
+        try:
+            result = fn()
+            ok = isinstance(result, dict) and result.get("status") == "success"
+        except Exception:
+            state["last_call_at"] = time.monotonic()
+            state["backoff"] = min(state["backoff"] * 2, _BACKOFF_CAP_MULTIPLIER)
+            raise
         state["last_call_at"] = time.monotonic()
-    return state
-
-
-def _note_option_chain_result(state: dict[str, Any], *, ok: bool) -> None:
-    with state["lock"]:
         state["backoff"] = 1 if ok else min(state["backoff"] * 2, _BACKOFF_CAP_MULTIPLIER)
-
-
-def _throttle_quote(dhan_client: Any) -> dict[str, Any]:
-    """Same as `_throttle_option_chain`, for the quote/ticker family (see
-    `_quote_state` above) — pass the returned state to
-    `_note_quote_result` once the call's outcome is known."""
-    state = _throttle_state(_quote_state, _client_key(dhan_client))
-    with state["lock"]:
-        interval = _QUOTE_MIN_INTERVAL_SECONDS * state["backoff"]
-        wait = interval - (time.monotonic() - state["last_call_at"])
-        if wait > 0:
-            time.sleep(wait)
-        state["last_call_at"] = time.monotonic()
-    return state
-
-
-def _note_quote_result(state: dict[str, Any], *, ok: bool) -> None:
-    with state["lock"]:
-        state["backoff"] = 1 if ok else min(state["backoff"] * 2, _BACKOFF_CAP_MULTIPLIER)
+        return result
 
 # Index underlyings quick-reference (from the dhanhq-skills SKILL.md).
 # security_id is fixed by Dhan; exchange_segment is always the index segment
@@ -233,30 +237,28 @@ def fetch_quotes(dhan_client: "dhanhq", securities: dict[str, list[Any]]) -> dic
     `securities` is Dhan's own request shape, e.g. {"NSE_FNO": [45106, 45093]}
     — group everything you need into as few segments as possible in one call;
     Dhan's quote API is rate-limited to 1 request/sec per account, enforced
-    here via `_throttle_quote`/`_note_quote_result` regardless of how many
-    strategies are calling this concurrently (see the comment above
-    `_quote_state`) — a real failure backs this account's own pacing off,
-    a success resets it. A failed call or a missing security in the
-    response is simply absent from the returned dict — callers should
-    treat a missing key as "no fresh quote available," not raise.
+    here via `_throttled_call` regardless of how many strategies are
+    calling this concurrently (see the comment above `_quote_state`) — a
+    real failure backs this account's own pacing off, a success resets it.
+    A failed call or a missing security in the response is simply absent
+    from the returned dict — callers should treat a missing key as "no
+    fresh quote available," not raise.
     """
-    state = _throttle_quote(dhan_client)
     try:
-        response = _call_with_retry(lambda: dhan_client.quote_data(securities))
+        response = _throttled_call(
+            _quote_state, dhan_client, _QUOTE_MIN_INTERVAL_SECONDS,
+            lambda: _call_with_retry(lambda: dhan_client.quote_data(securities)),
+        )
     except Exception as exc:  # noqa: BLE001
-        _note_quote_result(state, ok=False)
         logger.warning("quote_data call raised for %s: %s: %s", securities, type(exc).__name__, exc)
         return {}
     if response.get("status") != "success":
-        _note_quote_result(state, ok=False)
         logger.warning("quote_data call failed for %s: %s", securities, response.get("remarks") or response)
         return {}
     data = _unwrap_nested(response.get("data"))
     if not isinstance(data, dict):
-        _note_quote_result(state, ok=False)
         logger.warning("quote_data returned an unexpected shape for %s: %r", securities, response.get("data"))
         return {}
-    _note_quote_result(state, ok=True)
 
     result: dict[tuple[str, str], dict[str, Any]] = {}
     for segment, sid_map in data.items():
@@ -285,20 +287,18 @@ def fetch_spot_price(dhan_client: "dhanhq", exchange_segment: str, security_id: 
     Shares this account's quote-family throttle/backoff with fetch_quotes
     (see `_quote_state`) — Dhan rate-limits ticker_data and quote_data
     together, one combined per-account budget, not two separate ones."""
-    state = _throttle_quote(dhan_client)
     try:
-        response = _call_with_retry(lambda: dhan_client.ticker_data({exchange_segment: [security_id]}))
+        response = _throttled_call(
+            _quote_state, dhan_client, _QUOTE_MIN_INTERVAL_SECONDS,
+            lambda: _call_with_retry(lambda: dhan_client.ticker_data({exchange_segment: [security_id]})),
+        )
     except Exception:  # noqa: BLE001
-        _note_quote_result(state, ok=False)
         return None
     if response.get("status") != "success":
-        _note_quote_result(state, ok=False)
         return None
     data = _unwrap_nested(response.get("data"))
     if not isinstance(data, dict):
-        _note_quote_result(state, ok=False)
         return None
-    _note_quote_result(state, ok=True)
     quote = (data.get(exchange_segment) or {}).get(str(security_id))
     if not quote:
         return None
@@ -439,23 +439,21 @@ def fetch_chain_df(
 ) -> tuple[pd.DataFrame, float]:
     """Fetch option-chain data for a given user's client and return a
     normalized DataFrame plus spot price. Raises on failure (unlike
-    fetch_quotes/fetch_spot_price) — always has, this only adds recording
-    the outcome against this account's own option-chain throttle/backoff
-    (see `_option_chain_state`) before re-raising, so a failure here also
-    slows this account's *next* option_chain call down rather than
-    hammering at the same fixed pace regardless of what just happened."""
-    state = _throttle_option_chain(dhan_client)
-    try:
-        response = dhan_client.option_chain(
+    fetch_quotes/fetch_spot_price) — always has. The raw call is throttled
+    (and its outcome recorded against this account's own option-chain
+    backoff, see `_option_chain_state`) via `_throttled_call`; normalizing
+    the response happens after and can raise for its own separate reasons
+    (a malformed payload despite Dhan reporting success) without that
+    counting as a rate-limit failure."""
+    response = _throttled_call(
+        _option_chain_state, dhan_client, _OPTION_CHAIN_MIN_INTERVAL_SECONDS,
+        lambda: dhan_client.option_chain(
             under_security_id=under_security_id,
             under_exchange_segment=under_exchange_segment,
             expiry=expiry,
-        )
-        spot, rows = normalize_option_chain(response)
-    except Exception:
-        _note_option_chain_result(state, ok=False)
-        raise
-    _note_option_chain_result(state, ok=True)
+        ),
+    )
+    spot, rows = normalize_option_chain(response)
     return pd.DataFrame(rows), spot
 
 
