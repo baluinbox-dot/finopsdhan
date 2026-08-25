@@ -29,7 +29,7 @@ from app.dhan.helpers import (
     find_strike_by_nearest_premium,
     get_lot_size,
 )
-from app.strategies.base import OrderLeg, Strategy, StrategyContext
+from app.strategies.base import OrderLeg, Strategy, StrategyContext, resolve_order_type
 
 IST = ZoneInfo("Asia/Kolkata")
 
@@ -87,10 +87,12 @@ class SingleLegSellerWithHedge(Strategy):
         "hedge_premium_target": 0,
         "window_start": "09:15",
         "window_end": "15:15",
+        "order_type": "LIMIT",  # "LIMIT" (safe default) or "MARKET" (no price protection)
     }
 
     def evaluate_entry(self, ctx: StrategyContext) -> list[OrderLeg] | None:
         p = {**self.default_params, **ctx.params}
+        order_type = resolve_order_type(p)
 
         now_ist = _now_ist()
         window_start = _parse_hhmm(p["window_start"])
@@ -172,7 +174,7 @@ class SingleLegSellerWithHedge(Strategy):
                 exchange_segment=meta["option_segment"],
                 transaction_type="SELL",
                 quantity=quantity,
-                order_type="LIMIT",
+                order_type=order_type,
                 product_type="INTRADAY",
                 price=float(target_row[price_col]),
                 role="primary",
@@ -200,7 +202,7 @@ class SingleLegSellerWithHedge(Strategy):
                     exchange_segment=meta["option_segment"],
                     transaction_type="BUY",
                     quantity=quantity,
-                    order_type="LIMIT",
+                    order_type=order_type,
                     product_type="INTRADAY",
                     price=float(best_row[price_col]),
                     role="hedge",

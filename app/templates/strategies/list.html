@@ -96,6 +96,13 @@
                             <input type="number" name="target_pct" value="50" class="form-control form-control-sm">
                         </div>
                         <div class="col-12">
+                            <label class="form-label small mb-0">Order Type</label>
+                            <select name="order_type" class="form-select form-select-sm">
+                                <option value="LIMIT" selected>Limit (safe default)</option>
+                                <option value="MARKET">Market (no price protection)</option>
+                            </select>
+                        </div>
+                        <div class="col-12">
                             <label class="form-label small mb-0">Mode</label>
                             <select name="mode" class="form-select form-select-sm">
                                 <option value="paper" selected>Paper (simulated)</option>

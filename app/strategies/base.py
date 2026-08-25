@@ -35,6 +35,24 @@ class OrderLeg:
     pair_id: str | None = None
 
 
+def resolve_order_type(params: dict[str, Any]) -> str:
+    """Every strategy's `order_type` param, validated to exactly "LIMIT" or
+    "MARKET" (defaulting to "LIMIT" — Balu's own explicit choice, not this
+    codebase's original safety default — for anything missing/unrecognized).
+    Call once per leg-building method (`p = order_type = resolve_order_type(p)`
+    pattern) and pass the result to every `OrderLeg(order_type=...)` in that
+    method, so a whole entry/roll is internally consistent. MARKET means no
+    price protection at all — the order fills at whatever price is
+    available, which can be materially worse than the last quote on a thin
+    strike; LIMIT (the original default) fills at-or-better than the price
+    set or not at all. See app/engine/runner.py's `_place_or_paper_leg` for
+    how a MARKET leg's *live* order is actually placed (price zeroed there,
+    not here — `leg.price` itself stays the real LTP snapshot everywhere
+    else, e.g. paper fills and P&L math, regardless of order_type)."""
+    value = str(params.get("order_type") or "LIMIT").upper()
+    return value if value in ("LIMIT", "MARKET") else "LIMIT"
+
+
 def leg_pnl(leg_data: dict[str, Any], reference_price: float) -> float:
     """Realized (or mark-to-market, if `reference_price` is a live quote
     rather than an actual exit fill) P&L in rupees for one leg, given its
