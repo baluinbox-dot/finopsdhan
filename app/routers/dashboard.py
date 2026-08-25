@@ -11,6 +11,7 @@ from fastapi.responses import RedirectResponse
 from sqlalchemy import select
 
 from app.dhan.client import DhanNotConnectedError, get_user_dhan_client
+from app.dhan.helpers import UNDERLYINGS
 from app.deps import CurrentUser, DbSession
 from app.engine.pnl import compute_live_pnl
 from app.engine.runner import find_open_run
@@ -24,6 +25,19 @@ router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 # back to the default rather than erroring.
 ORDERS_PER_PAGE_CHOICES = (5, 10, 15, 20, 25, 50, 100)
 ORDERS_PER_PAGE_DEFAULT = 10
+
+
+def _underlying_of(us: UserStrategy | None) -> str | None:
+    """A UserStrategy's own traded underlying (NIFTY/BANKNIFTY/...), read
+    off its saved params — every strategy that has an Underlying dropdown
+    on its configure page stores it under this same "underlying" key. The
+    one strategy without a configure-time choice (the demo, hardcoded to
+    NIFTY's own security_id/segment) has no such key and simply never
+    matches a specific underlying filter, only "All Underlyings"."""
+    if us is None:
+        return None
+    value = (us.params or {}).get("underlying")
+    return str(value).upper() if value else None
 
 
 def _pair_orders(orders: list[Order]) -> tuple[list[Order], list[tuple[Order, Order]]]:
@@ -82,12 +96,31 @@ def dashboard(
     running_page: int = 1,
     running_per_page: int = ORDERS_PER_PAGE_DEFAULT,
     strategy_id: str = "",
+    underlying: str = "",
 ):
+    underlying = underlying.upper()
+    if underlying and underlying not in UNDERLYINGS:
+        underlying = ""  # unrecognized value (tampered/stale link) -> "All Underlyings"
+
     user_strategies = db.scalars(
         select(UserStrategy).where(UserStrategy.user_id == current_user.id)
     ).all()
     active_count = sum(1 for us in user_strategies if us.is_active)
     open_run_ids = {us.id for us in user_strategies if find_open_run(us) is not None}
+
+    # Underlying filter narrows *everything* below it — "My Strategies", the
+    # Strategy dropdown's own option list (so it only ever offers instances
+    # that actually match), and the Running/Closed tables. Independent of
+    # (and orthogonal to) the Strategy filter: picking an underlying resets
+    # any previously-selected specific strategy_id that no longer belongs
+    # to it (the underlying <select>'s own form simply doesn't carry
+    # strategy_id forward — see the template), so the two never end up
+    # contradicting each other.
+    visible_strategies = (
+        [us for us in user_strategies if _underlying_of(us) == underlying] if underlying else user_strategies
+    )
+    if strategy_id and strategy_id not in {str(us.id) for us in visible_strategies}:
+        strategy_id = ""  # no longer a valid choice under the current underlying filter
 
     # Pairing needs every order (an entry can be arbitrarily far behind its
     # exit), so this loads the user's full order history rather than one
@@ -97,15 +130,22 @@ def dashboard(
         select(Order).where(Order.user_id == current_user.id).order_by(Order.placed_at.asc())
     ).all()
 
-    # Strategy filter (Running/Closed tables only — the stat cards and "My
-    # Strategies" table above always show everything regardless). An order
-    # with no strategy_run (shouldn't normally happen, but Order.strategy_run_id
-    # is nullable) never matches a specific filter — only "All Strategies".
+    # Strategy/underlying filters (Running/Closed tables only — the stat
+    # cards always show everything regardless). An order with no
+    # strategy_run (shouldn't normally happen, but Order.strategy_run_id is
+    # nullable) never matches a specific filter — only "All".
+    us_by_id = {us.id: us for us in user_strategies}
     filtered_orders = all_orders
     if strategy_id:
         filtered_orders = [
-            o for o in all_orders
+            o for o in filtered_orders
             if o.strategy_run is not None and str(o.strategy_run.user_strategy_id) == strategy_id
+        ]
+    if underlying:
+        filtered_orders = [
+            o for o in filtered_orders
+            if o.strategy_run is not None
+            and _underlying_of(us_by_id.get(o.strategy_run.user_strategy_id)) == underlying
         ]
 
     running_orders, closed_pairs = _pair_orders(filtered_orders)
@@ -144,7 +184,12 @@ def dashboard(
         "dashboard/index.html",
         {
             "current_user": current_user,
-            "user_strategies": user_strategies,
+            # Filtered by the Underlying dropdown (if any) — both the "My
+            # Strategies" table and the Strategy dropdown's own option list
+            # read from this, not the unfiltered full list.
+            "user_strategies": visible_strategies,
+            "underlyings": UNDERLYINGS,
+            "underlying": underlying,
             "active_count": active_count,
             "open_run_ids": open_run_ids,
             "running_rows": running_rows,

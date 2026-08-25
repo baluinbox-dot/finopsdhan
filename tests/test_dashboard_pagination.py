@@ -288,3 +288,117 @@ def test_dashboard_strategy_filter_narrows_running_and_closed(client, db_session
     resp_all = client.get("/dashboard")
     assert "NIFTY 24000 CE" in resp_all.text
     assert "NIFTY 25000 PE" in resp_all.text
+
+
+def test_dashboard_underlying_filter_narrows_my_strategies_table(client, db_session):
+    """The Underlying dropdown (NIFTY/BANKNIFTY/...) scopes the "My
+    Strategies" table itself, not just Running/Closed Orders."""
+    user = _register_and_login(client, db_session, "trader@example.com")
+    strategy = Strategy(name="Rolling Strategy", code_ref="x", is_published=True)
+    db_session.add(strategy)
+    db_session.flush()
+    db_session.add(UserStrategy(
+        user_id=user.id, strategy_id=strategy.id, mode=StrategyMode.PAPER,
+        label="NIFTY Rolling", params={"underlying": "NIFTY"},
+    ))
+    db_session.add(UserStrategy(
+        user_id=user.id, strategy_id=strategy.id, mode=StrategyMode.PAPER,
+        label="BANKNIFTY Rolling", params={"underlying": "BANKNIFTY"},
+    ))
+    db_session.commit()
+
+    resp = client.get("/dashboard?underlying=NIFTY")
+    assert resp.status_code == 200
+    assert "NIFTY Rolling" in resp.text
+    assert "BANKNIFTY Rolling" not in resp.text
+
+    resp_all = client.get("/dashboard")
+    assert "NIFTY Rolling" in resp_all.text
+    assert "BANKNIFTY Rolling" in resp_all.text
+
+
+def test_dashboard_underlying_filter_narrows_running_and_closed_orders(client, db_session):
+    user = _register_and_login(client, db_session, "trader@example.com")
+
+    nifty_strategy = Strategy(name="NIFTY Strategy", code_ref="x", is_published=True)
+    db_session.add(nifty_strategy)
+    db_session.flush()
+    nifty_us = UserStrategy(
+        user_id=user.id, strategy_id=nifty_strategy.id, mode=StrategyMode.PAPER,
+        params={"underlying": "NIFTY"},
+    )
+    db_session.add(nifty_us)
+    db_session.flush()
+    nifty_run = StrategyRun(user_strategy_id=nifty_us.id, status="open", legs_planned={})
+    db_session.add(nifty_run)
+    db_session.flush()
+    db_session.add(Order(
+        user_id=user.id, strategy_run_id=nifty_run.id, security_id="1",
+        trading_symbol="NIFTY 24000 CE", transaction_type="SELL", quantity=75,
+        order_type="LIMIT", product_type="INTRADAY", price=100.0,
+        status=OrderStatus.PAPER_FILLED, is_paper=True, placed_at=datetime.now(timezone.utc),
+    ))
+
+    sensex_strategy = Strategy(name="SENSEX Strategy", code_ref="x", is_published=True)
+    db_session.add(sensex_strategy)
+    db_session.flush()
+    sensex_us = UserStrategy(
+        user_id=user.id, strategy_id=sensex_strategy.id, mode=StrategyMode.PAPER,
+        params={"underlying": "SENSEX"},
+    )
+    db_session.add(sensex_us)
+    db_session.flush()
+    sensex_run = StrategyRun(user_strategy_id=sensex_us.id, status="open", legs_planned={})
+    db_session.add(sensex_run)
+    db_session.flush()
+    db_session.add(Order(
+        user_id=user.id, strategy_run_id=sensex_run.id, security_id="2",
+        trading_symbol="SENSEX 80000 PE", transaction_type="SELL", quantity=20,
+        order_type="LIMIT", product_type="INTRADAY", price=200.0,
+        status=OrderStatus.PAPER_FILLED, is_paper=True, placed_at=datetime.now(timezone.utc),
+    ))
+    db_session.commit()
+
+    resp = client.get("/dashboard?underlying=SENSEX")
+    assert resp.status_code == 200
+    assert "SENSEX 80000 PE" in resp.text
+    assert "NIFTY 24000 CE" not in resp.text
+
+
+def test_dashboard_underlying_filter_resets_incompatible_strategy_filter(client, db_session):
+    """If a specific strategy is selected and the user then switches the
+    Underlying filter to something that strategy doesn't belong to, the
+    stale strategy_id must be dropped rather than silently hiding
+    everything (or crashing)."""
+    user = _register_and_login(client, db_session, "trader@example.com")
+    nifty_strategy = Strategy(name="NIFTY Strategy", code_ref="x", is_published=True)
+    db_session.add(nifty_strategy)
+    db_session.flush()
+    nifty_us = UserStrategy(
+        user_id=user.id, strategy_id=nifty_strategy.id, mode=StrategyMode.PAPER,
+        label="NIFTY Instance", params={"underlying": "NIFTY"},
+    )
+    db_session.add(nifty_us)
+    db_session.commit()
+
+    # strategy_id points at the NIFTY instance, but underlying=BANKNIFTY
+    # excludes it -- must not error, and the instance shouldn't show.
+    resp = client.get(f"/dashboard?strategy_id={nifty_us.id}&underlying=BANKNIFTY")
+    assert resp.status_code == 200
+    assert "NIFTY Instance" not in resp.text
+
+
+def test_dashboard_unknown_underlying_value_falls_back_to_all(client, db_session):
+    user = _register_and_login(client, db_session, "trader@example.com")
+    strategy = Strategy(name="Test Strategy", code_ref="x", is_published=True)
+    db_session.add(strategy)
+    db_session.flush()
+    db_session.add(UserStrategy(
+        user_id=user.id, strategy_id=strategy.id, mode=StrategyMode.PAPER,
+        label="NIFTY Instance", params={"underlying": "NIFTY"},
+    ))
+    db_session.commit()
+
+    resp = client.get("/dashboard?underlying=NOTREAL")
+    assert resp.status_code == 200
+    assert "NIFTY Instance" in resp.text  # falls back to "All Underlyings", not an empty/error page
