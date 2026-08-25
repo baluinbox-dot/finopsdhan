@@ -195,6 +195,15 @@ class Order(Base):
     order_type: Mapped[str] = mapped_column(String(20), nullable=False)  # LIMIT / MARKET / ...
     product_type: Mapped[str] = mapped_column(String(20), nullable=False)  # INTRADAY / MARGIN / ...
     price: Mapped[float] = mapped_column(Numeric(12, 2), default=0, nullable=False)
+    # "primary" | "hedge" (mirrors OrderLeg.role) — bookkeeping only, but
+    # load-bearing for app.routers.dashboard._pair_orders: two *different*
+    # logical legs (e.g. a hedge and a T/M/B window leg) can legitimately
+    # land on the same underlying option contract (same security_id), and
+    # grouping by security_id alone would then wire their orders into a
+    # fabricated entry/exit pair. Grouping by (security_id, role) too keeps
+    # them apart. Existing pre-migration rows default to "primary" (the
+    # overwhelming majority) since their real role was never persisted.
+    role: Mapped[str] = mapped_column(String(20), default="primary", server_default="primary", nullable=False)
 
     status: Mapped[OrderStatus] = mapped_column(Enum(OrderStatus, native_enum=False), default=OrderStatus.PLANNED, nullable=False)
     is_paper: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)

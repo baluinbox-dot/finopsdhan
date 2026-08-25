@@ -122,6 +122,7 @@ def _place_or_paper_leg(
         order_type=leg.order_type,
         product_type=leg.product_type,
         price=leg.price,
+        role=leg.role,
         status=status,
         is_paper=not is_live,
     )

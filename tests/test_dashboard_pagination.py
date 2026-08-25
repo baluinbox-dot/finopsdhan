@@ -290,6 +290,53 @@ def test_dashboard_strategy_filter_narrows_running_and_closed(client, db_session
     assert "NIFTY 25000 PE" in resp_all.text
 
 
+def test_dashboard_hedge_and_primary_leg_sharing_a_contract_stay_separate(client, db_session):
+    """Regression for a real incident (2026-08-25): a 3-Pair Rolling
+    hedge and a separately rolled-in primary window leg landed on the
+    same underlying option contract (same security_id). Both are
+    genuinely still open -- their two *entry* orders must not get grouped
+    together and wrongly paired off as a fabricated entry/exit "close"."""
+    user = _register_and_login(client, db_session, "trader@example.com")
+    strategy = Strategy(name="3-Pair Rolling", code_ref="three_pair_rolling", is_published=True)
+    db_session.add(strategy)
+    db_session.flush()
+    user_strategy = UserStrategy(user_id=user.id, strategy_id=strategy.id, mode=StrategyMode.PAPER)
+    db_session.add(user_strategy)
+    db_session.flush()
+    run = StrategyRun(user_strategy_id=user_strategy.id, status="open", legs_planned={})
+    db_session.add(run)
+    db_session.flush()
+
+    now = datetime.now(timezone.utc)
+    db_session.add_all([
+        # The hedge's real entry -- BUY 195, placed first.
+        Order(
+            user_id=user.id, strategy_run_id=run.id, security_id="61622",
+            trading_symbol="NIFTY 24100 PE 2026-08-27", transaction_type="BUY", quantity=195,
+            order_type="LIMIT", product_type="INTRADAY", price=12.80, role="hedge",
+            status=OrderStatus.PAPER_FILLED, is_paper=True, placed_at=now - timedelta(minutes=30),
+        ),
+        # A completely unrelated primary leg's entry, rolled in later,
+        # that happens to land on the exact same contract.
+        Order(
+            user_id=user.id, strategy_run_id=run.id, security_id="61622",
+            trading_symbol="NIFTY 24100 PE 2026-08-27", transaction_type="SELL", quantity=65,
+            order_type="LIMIT", product_type="INTRADAY", price=16.25, role="primary",
+            status=OrderStatus.PAPER_FILLED, is_paper=True, placed_at=now,
+        ),
+    ])
+    db_session.commit()
+
+    resp = client.get("/dashboard")
+    assert resp.status_code == 200
+    # Both legs still open -- neither the fabricated P&L (+672.75, from
+    # (16.25-12.80)*195) nor "No running orders." must appear.
+    assert "No running orders." not in resp.text
+    assert "672.75" not in resp.text
+    assert "Showing 1 to 2 of 2 running records" in resp.text
+    assert "No closed orders today." in resp.text
+
+
 def test_dashboard_underlying_filter_narrows_my_strategies_table(client, db_session):
     """The Underlying dropdown (NIFTY/BANKNIFTY/...) scopes the "My
     Strategies" table itself, not just Running/Closed Orders."""
