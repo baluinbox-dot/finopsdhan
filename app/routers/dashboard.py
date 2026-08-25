@@ -46,15 +46,27 @@ def _pair_orders(orders: list[Order]) -> tuple[list[Order], list[tuple[Order, Or
     Every leg is opened by exactly one order and, once it closes, reversed
     by exactly one more (see app/engine/runner.py — every close/roll/leg-
     exit path always places the opposite-side order at the same
-    security_id). Grouping by (strategy_run_id, security_id) and pairing
-    consecutively by fill time recovers that structure directly from the
-    order history itself — no separate bookkeeping needed, and it holds
-    equally for a plain single-shot strategy, a rolled-away leg inside a
-    still-open run, and a fully-closed run."""
-    groups: dict[tuple[str, str], list[Order]] = defaultdict(list)
+    security_id). Grouping by (strategy_run_id, security_id, role) and
+    pairing consecutively by fill time recovers that structure directly
+    from the order history itself — no separate bookkeeping needed, and it
+    holds equally for a plain single-shot strategy, a rolled-away leg
+    inside a still-open run, and a fully-closed run.
+
+    `role` is part of the grouping key, not just security_id, because a
+    hedge leg and an independently-managed primary leg (e.g. a 3-Pair
+    Rolling T/M/B window pair, picked separately from the hedge) can
+    legitimately land on the exact same underlying option contract —
+    same security_id — while being two completely unrelated legs. Without
+    `role` in the key, their two *entry* orders get grouped together and
+    wrongly paired off as one fabricated entry->exit "close", hiding both
+    real (still-open) legs from Running Orders and inventing a P&L from
+    two prices that were never actually a matched trade. Confirmed live
+    2026-08-25 on a NIFTY 3-Pair Rolling hedge (24100 PE) that happened to
+    coincide with a rolled-in window leg on the same strike."""
+    groups: dict[tuple[str, str, str], list[Order]] = defaultdict(list)
     for o in orders:
         run_key = str(o.strategy_run_id) if o.strategy_run_id else f"_norun_{o.id}"
-        groups[(run_key, o.security_id)].append(o)
+        groups[(run_key, o.security_id, o.role)].append(o)
 
     running: list[Order] = []
     closed: list[tuple[Order, Order]] = []
