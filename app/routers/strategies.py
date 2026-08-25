@@ -13,6 +13,7 @@ from fastapi import APIRouter, Form, Request
 from fastapi.responses import RedirectResponse
 from sqlalchemy import select
 
+from app.config import get_settings
 from app.dhan.client import DhanNotConnectedError, get_user_dhan_client
 from app.dhan.helpers import UNDERLYINGS, fetch_chain_df, get_lot_size, list_expiries
 from app.deps import CurrentUser, DbSession, SuperadminUser
@@ -39,6 +40,45 @@ def _classify_expiries(expiries: list[str]) -> dict[str, str]:
         by_month[(parsed.year, parsed.month)].append(expiry)
     monthly = {max(dates) for dates in by_month.values()}
     return {expiry: ("monthly" if expiry in monthly else "weekly") for expiry in expiries}
+
+
+def _resolve_requested_mode(request: Request, mode: str, live_confirmed: bool) -> StrategyMode:
+    """Turn the submitted Mode + Live-confirmation checkbox into an actual
+    StrategyMode. LIVE only when BOTH the user explicitly checked the
+    confirmation checkbox on this exact submission AND the server's own
+    ALLOW_LIVE_TRADING master switch is on — app.engine.runner mirrors
+    this same double-gate before ever placing a real order (see its
+    module docstring: `is_live = user_strategy.mode == LIVE and
+    settings.allow_live_trading`), so an instance saved as LIVE here can
+    still never actually trade live if the server switch is off; this
+    just keeps the UI from claiming success it can't back up. Falls back
+    to PAPER with a clear flash message for any of: Mode wasn't actually
+    Live, the checkbox wasn't checked, or the server-side switch is off."""
+    if mode != "live":
+        return StrategyMode.PAPER
+    if not live_confirmed:
+        flash(
+            request,
+            "Live mode requires checking the confirmation box below — the strategy has "
+            "been turned on in paper mode instead.",
+            "warning",
+        )
+        return StrategyMode.PAPER
+    if not get_settings().allow_live_trading:
+        flash(
+            request,
+            "Live trading isn't enabled on this server yet — the strategy has been "
+            "turned on in paper mode instead.",
+            "warning",
+        )
+        return StrategyMode.PAPER
+    flash(
+        request,
+        "LIVE mode confirmed — this instance will place real orders with real money on "
+        "your connected Dhan account.",
+        "warning",
+    )
+    return StrategyMode.LIVE
 
 
 @router.get("")
@@ -78,6 +118,7 @@ def enable_strategy(
     stop_loss_pct: int = Form(30),
     target_pct: int = Form(50),
     order_type: str = Form("LIMIT"),
+    live_confirmed: bool = Form(False),
     mode: str = Form("paper"),
 ):
     strategy = db.get(Strategy, strategy_id)
@@ -89,16 +130,7 @@ def enable_strategy(
         flash(request, "Connect your Dhan account on the Settings page before enabling a strategy.", "error")
         return RedirectResponse(url("/strategies"), status_code=303)
 
-    requested_mode = StrategyMode.LIVE if mode == "live" else StrategyMode.PAPER
-    if requested_mode == StrategyMode.LIVE:
-        flash(
-            request,
-            "Live trading isn't enabled from this screen yet — the strategy has been "
-            "turned on in paper mode instead. Live mode requires a separate explicit "
-            "confirmation step.",
-            "warning",
-        )
-        requested_mode = StrategyMode.PAPER
+    requested_mode = _resolve_requested_mode(request, mode, live_confirmed)
 
     params = {
         "lots": lots,
@@ -295,6 +327,7 @@ def configure_strategy_submit(
     window_start: str = Form("09:15"),
     window_end: str = Form("15:15"),
     order_type: str = Form("LIMIT"),
+    live_confirmed: bool = Form(False),
     mode: str = Form("paper"),
 ):
     strategy = db.get(Strategy, strategy_id)
@@ -317,16 +350,7 @@ def configure_strategy_submit(
             redirect_url += f"&user_strategy_id={user_strategy_id}"
         return RedirectResponse(url(redirect_url), status_code=303)
 
-    requested_mode = StrategyMode.LIVE if mode == "live" else StrategyMode.PAPER
-    if requested_mode == StrategyMode.LIVE:
-        flash(
-            request,
-            "Live trading isn't enabled from this screen yet — the strategy has been "
-            "turned on in paper mode instead. Live mode requires a separate explicit "
-            "confirmation step.",
-            "warning",
-        )
-        requested_mode = StrategyMode.PAPER
+    requested_mode = _resolve_requested_mode(request, mode, live_confirmed)
 
     params = {
         "underlying": underlying.upper(),
@@ -642,6 +666,7 @@ def configure_rolling_submit(
     hedge_enabled: bool = Form(False),
     hedge_premium_target: float = Form(5),
     order_type: str = Form("LIMIT"),
+    live_confirmed: bool = Form(False),
     mode: str = Form("paper"),
 ):
     strategy = db.get(Strategy, strategy_id)
@@ -671,16 +696,7 @@ def configure_rolling_submit(
             redirect_url += f"&user_strategy_id={user_strategy_id}"
         return RedirectResponse(url(redirect_url), status_code=303)
 
-    requested_mode = StrategyMode.LIVE if mode == "live" else StrategyMode.PAPER
-    if requested_mode == StrategyMode.LIVE:
-        flash(
-            request,
-            "Live trading isn't enabled from this screen yet — the strategy has been "
-            "turned on in paper mode instead. Live mode requires a separate explicit "
-            "confirmation step.",
-            "warning",
-        )
-        requested_mode = StrategyMode.PAPER
+    requested_mode = _resolve_requested_mode(request, mode, live_confirmed)
 
     params = {
         "underlying": underlying.upper(),
@@ -856,6 +872,7 @@ def configure_straddle_submit(
     hedge_enabled: bool = Form(False),
     hedge_premium_target: float = Form(5),
     order_type: str = Form("LIMIT"),
+    live_confirmed: bool = Form(False),
     mode: str = Form("paper"),
 ):
     strategy = db.get(Strategy, strategy_id)
@@ -885,16 +902,7 @@ def configure_straddle_submit(
             redirect_url += f"&user_strategy_id={user_strategy_id}"
         return RedirectResponse(url(redirect_url), status_code=303)
 
-    requested_mode = StrategyMode.LIVE if mode == "live" else StrategyMode.PAPER
-    if requested_mode == StrategyMode.LIVE:
-        flash(
-            request,
-            "Live trading isn't enabled from this screen yet — the strategy has been "
-            "turned on in paper mode instead. Live mode requires a separate explicit "
-            "confirmation step.",
-            "warning",
-        )
-        requested_mode = StrategyMode.PAPER
+    requested_mode = _resolve_requested_mode(request, mode, live_confirmed)
 
     params = {
         "underlying": underlying.upper(),
@@ -1071,6 +1079,7 @@ def configure_rolling_legsl_submit(
     hedge_enabled: bool = Form(False),
     hedge_premium_target: float = Form(5),
     order_type: str = Form("LIMIT"),
+    live_confirmed: bool = Form(False),
     mode: str = Form("paper"),
 ):
     strategy = db.get(Strategy, strategy_id)
@@ -1117,16 +1126,7 @@ def configure_rolling_legsl_submit(
             redirect_url += f"&user_strategy_id={user_strategy_id}"
         return RedirectResponse(url(redirect_url), status_code=303)
 
-    requested_mode = StrategyMode.LIVE if mode == "live" else StrategyMode.PAPER
-    if requested_mode == StrategyMode.LIVE:
-        flash(
-            request,
-            "Live trading isn't enabled from this screen yet — the strategy has been "
-            "turned on in paper mode instead. Live mode requires a separate explicit "
-            "confirmation step.",
-            "warning",
-        )
-        requested_mode = StrategyMode.PAPER
+    requested_mode = _resolve_requested_mode(request, mode, live_confirmed)
 
     params = {
         "underlying": underlying.upper(),
@@ -1308,6 +1308,7 @@ def configure_iron_condor_submit(
     stop_loss_value: float = Form(10000),
     target_value: float = Form(15000),
     order_type: str = Form("LIMIT"),
+    live_confirmed: bool = Form(False),
     mode: str = Form("paper"),
 ):
     strategy = db.get(Strategy, strategy_id)
@@ -1337,16 +1338,7 @@ def configure_iron_condor_submit(
             redirect_url += f"&user_strategy_id={user_strategy_id}"
         return RedirectResponse(url(redirect_url), status_code=303)
 
-    requested_mode = StrategyMode.LIVE if mode == "live" else StrategyMode.PAPER
-    if requested_mode == StrategyMode.LIVE:
-        flash(
-            request,
-            "Live trading isn't enabled from this screen yet — the strategy has been "
-            "turned on in paper mode instead. Live mode requires a separate explicit "
-            "confirmation step.",
-            "warning",
-        )
-        requested_mode = StrategyMode.PAPER
+    requested_mode = _resolve_requested_mode(request, mode, live_confirmed)
 
     params = {
         "underlying": underlying.upper(),
