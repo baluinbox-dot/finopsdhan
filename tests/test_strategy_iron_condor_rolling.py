@@ -11,6 +11,13 @@ from app.strategies.iron_condor_rolling import IronCondorRollingStrategy
 
 IST = ZoneInfo("Asia/Kolkata")
 
+# A fixed calendar date can't be hardcoded here — evaluate_entry() itself
+# refuses to enter once "today" (real wall-clock, not the _patched_now()
+# time-of-day-only mock below) has passed the configured expiry, so a
+# literal past date silently turns entry tests into no-ops. Always computed
+# relative to the real today instead.
+FUTURE_EXPIRY = (datetime.now(IST).date() + timedelta(days=60)).isoformat()
+
 # Strikes every 50 points from 23350 to 24650 — wide enough to cover the
 # default entry (spot 24000, sell_offset 250, buy_offset 350 -> 23650..24350)
 # and both roll directions (down to 23750/23850, up to 24150/24250).
@@ -42,7 +49,7 @@ CHAIN_RESPONSE = {
 
 def _mock_dhan_client(spot: float = 24000.0) -> MagicMock:
     dhan = MagicMock()
-    dhan.expiry_list.return_value = {"status": "success", "data": {"status": "success", "data": ["2026-08-27"]}}
+    dhan.expiry_list.return_value = {"status": "success", "data": {"status": "success", "data": [FUTURE_EXPIRY]}}
     response = {**CHAIN_RESPONSE, "data": {**CHAIN_RESPONSE["data"], "data": {**CHAIN_RESPONSE["data"]["data"], "last_price": spot}}}
     dhan.option_chain.return_value = response
     dhan.ticker_data.return_value = {"status": "success", "data": {"status": "success", "data": {"IDX_I": {"13": {"last_price": spot}}}}}
@@ -83,7 +90,7 @@ def _leg(strike: int, txn: str, option_type: str, pair_id: str, price: float = 1
     sid = _ce_id(strike) if option_type == "CE" else _pe_id(strike)
     return {
         "label": f"{txn} {strike} {option_type}", "security_id": sid,
-        "trading_symbol": f"NIFTY {strike} {option_type} 2026-08-27", "exchange_segment": "NSE_FNO",
+        "trading_symbol": f"NIFTY {strike} {option_type} {FUTURE_EXPIRY}", "exchange_segment": "NSE_FNO",
         "transaction_type": txn, "quantity": quantity, "order_type": "LIMIT", "product_type": "INTRADAY",
         "price": price, "role": "primary", "pair_id": pair_id,
     }
@@ -109,7 +116,7 @@ def _condor_notes(
 
 def test_entry_creates_four_legs_at_the_configured_offsets():
     dhan = _mock_dhan_client(spot=24000.0)
-    ctx = StrategyContext(dhan_client=dhan, params={"expiry": "2026-08-27"}, today_run_count=0)
+    ctx = StrategyContext(dhan_client=dhan, params={"expiry": FUTURE_EXPIRY}, today_run_count=0)
     strategy = IronCondorRollingStrategy()
 
     with _patched_now(_within_window_time()):
@@ -144,7 +151,7 @@ def test_entry_blocked_when_expiry_has_already_passed():
 
 def test_entry_blocked_before_start_time():
     dhan = _mock_dhan_client()
-    ctx = StrategyContext(dhan_client=dhan, params={"expiry": "2026-08-27"}, today_run_count=0)
+    ctx = StrategyContext(dhan_client=dhan, params={"expiry": FUTURE_EXPIRY}, today_run_count=0)
     strategy = IronCondorRollingStrategy()
     with _patched_now(_before_start_time()):
         assert strategy.evaluate_entry(ctx) is None
@@ -152,7 +159,7 @@ def test_entry_blocked_before_start_time():
 
 def test_entry_blocked_after_one_entry_today():
     dhan = _mock_dhan_client()
-    ctx = StrategyContext(dhan_client=dhan, params={"expiry": "2026-08-27"}, today_run_count=1)
+    ctx = StrategyContext(dhan_client=dhan, params={"expiry": FUTURE_EXPIRY}, today_run_count=1)
     strategy = IronCondorRollingStrategy()
     with _patched_now(_within_window_time()):
         assert strategy.evaluate_entry(ctx) is None
@@ -162,7 +169,7 @@ def test_entry_returns_none_when_buy_offset_not_greater_than_sell_offset():
     dhan = _mock_dhan_client()
     ctx = StrategyContext(
         dhan_client=dhan,
-        params={"expiry": "2026-08-27", "sell_offset_points": 250, "buy_offset_points": 250},
+        params={"expiry": FUTURE_EXPIRY, "sell_offset_points": 250, "buy_offset_points": 250},
         today_run_count=0,
     )
     strategy = IronCondorRollingStrategy()
@@ -249,7 +256,7 @@ def test_evaluate_exit_true_on_pct_target():
 def test_ce_side_touched_rolls_pe_side_only():
     strategy = IronCondorRollingStrategy()
     dhan = _mock_dhan_client(spot=24350.0)  # spot at CEB -> roll PE side
-    ctx = StrategyContext(dhan_client=dhan, params={"expiry": "2026-08-27"})
+    ctx = StrategyContext(dhan_client=dhan, params={"expiry": FUTURE_EXPIRY})
 
     decision = strategy.evaluate_rolls(ctx, _condor_notes())
 
@@ -266,7 +273,7 @@ def test_ce_side_touched_rolls_pe_side_only():
 def test_pe_side_touched_rolls_ce_side_only():
     strategy = IronCondorRollingStrategy()
     dhan = _mock_dhan_client(spot=23650.0)  # spot at PEB -> roll CE side
-    ctx = StrategyContext(dhan_client=dhan, params={"expiry": "2026-08-27"})
+    ctx = StrategyContext(dhan_client=dhan, params={"expiry": FUTURE_EXPIRY})
 
     decision = strategy.evaluate_rolls(ctx, _condor_notes())
 
@@ -288,7 +295,7 @@ def test_roll_gap_is_derived_from_the_triggering_sides_own_current_width_not_a_f
     strategy = IronCondorRollingStrategy()
     dhan = _mock_dhan_client(spot=24450.0)
     notes = _condor_notes(ceb=24450, ces=24250, pes=23750, peb=23650)
-    ctx = StrategyContext(dhan_client=dhan, params={"expiry": "2026-08-27"})
+    ctx = StrategyContext(dhan_client=dhan, params={"expiry": FUTURE_EXPIRY})
 
     decision = strategy.evaluate_rolls(ctx, notes)
 
@@ -301,7 +308,7 @@ def test_roll_gap_is_derived_from_the_triggering_sides_own_current_width_not_a_f
 def test_no_roll_when_spot_is_comfortably_inside_the_condor():
     strategy = IronCondorRollingStrategy()
     dhan = _mock_dhan_client(spot=24000.0)
-    ctx = StrategyContext(dhan_client=dhan, params={"expiry": "2026-08-27"})
+    ctx = StrategyContext(dhan_client=dhan, params={"expiry": FUTURE_EXPIRY})
     assert strategy.evaluate_rolls(ctx, _condor_notes()) is None
 
 
@@ -313,7 +320,7 @@ def test_roll_does_not_retrigger_once_the_boundary_has_already_rolled_its_opposi
     dhan = _mock_dhan_client(spot=24350.0)
     notes = _condor_notes()
     notes["leg_state"] = {_ce_id(24350): {"triggered_roll": True}}
-    ctx = StrategyContext(dhan_client=dhan, params={"expiry": "2026-08-27"})
+    ctx = StrategyContext(dhan_client=dhan, params={"expiry": FUTURE_EXPIRY})
     assert strategy.evaluate_rolls(ctx, notes) is None
 
 
@@ -325,5 +332,5 @@ def test_no_roll_when_not_a_clean_four_leg_condor():
     # this strategy (no per-leg exits), but evaluate_rolls must still not
     # guess when the shape isn't exactly 2+2 open legs.
     notes["leg_state"] = {_ce_id(24250): {"status": "closed"}}
-    ctx = StrategyContext(dhan_client=dhan, params={"expiry": "2026-08-27"})
+    ctx = StrategyContext(dhan_client=dhan, params={"expiry": FUTURE_EXPIRY})
     assert strategy.evaluate_rolls(ctx, notes) is None
