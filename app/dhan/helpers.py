@@ -183,26 +183,40 @@ UNDERLYINGS: dict[str, dict[str, Any]] = {
 }
 
 
+_RATE_LIMIT_MESSAGE = (
+    "Dhan didn't return a specific error, which usually means you're being "
+    "rate-limited (too many requests too quickly). Wait a few seconds and "
+    "try again."
+)
+
+
 def format_dhan_error(remarks: Any) -> str:
     """Turn the SDK's ``remarks`` field into a readable message.
 
     On a non-2xx HTTP response, dhanhq's http layer (`dhan_http.py`) builds
     `remarks` from the response body's `errorCode`/`errorType`/`errorMessage`
-    keys. When Dhan's response doesn't use that shape — most commonly a 429
-    rate-limit response — all three come back None and the raw dict is
-    useless to show a user. Detect that specific case and say what's
-    actually going on instead.
+    keys. When Dhan's response doesn't use that shape, all three come back
+    None and the raw dict alone can't tell a true 429 rate-limit apart from
+    e.g. an "Invalid Expiry Date" 400 or an expired-token 401 — both were
+    seen live misreported as "probably rate-limited" before this. In that
+    ambiguous case, `app.dhan.diagnostics.install()`'s patch has already
+    (best-effort) added `status_code` and, when Dhan's body carried a
+    single `{"data": {"<code>": "<message>"}}` entry, `raw_message` onto
+    this same dict — use those when present instead of guessing.
     """
     if isinstance(remarks, dict):
         code = remarks.get("error_code")
         etype = remarks.get("error_type")
         message = remarks.get("error_message")
         if not code and not etype and not message:
-            return (
-                "Dhan didn't return a specific error, which usually means "
-                "you're being rate-limited (too many requests too quickly). "
-                "Wait a few seconds and try again."
-            )
+            status_code = remarks.get("status_code")
+            raw_message = remarks.get("raw_message")
+            if raw_message:
+                suffix = f" (HTTP {status_code})" if status_code else ""
+                return f"Dhan error: {raw_message}{suffix}"
+            if status_code and status_code != 429:
+                return f"Dhan request failed with HTTP {status_code} and no further detail in the response."
+            return _RATE_LIMIT_MESSAGE
         label = etype or "Error"
         suffix = f" ({code})" if code else ""
         return f"{label}: {message or 'no message'}{suffix}"

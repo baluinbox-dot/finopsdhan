@@ -24,8 +24,10 @@ open must not retroactively change that position's rules.
 from __future__ import annotations
 
 import logging
+import threading
+import uuid
 from dataclasses import asdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -34,13 +36,61 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.dhan.client import DhanNotConnectedError, get_user_dhan_client
 from app.dhan.helpers import fetch_quotes, preview_order
-from app.models import Order, OrderStatus, StrategyMode, StrategyRun, UserStrategy
+from app.email import send_email
+from app.models import Order, OrderStatus, StrategyMode, StrategyRun, User, UserStrategy
 from app.strategies.base import OrderLeg, StrategyContext, leg_pnl
 from app.strategies.registry import get_strategy_class
 
 logger = logging.getLogger("app.engine")
 
 IST = ZoneInfo("Asia/Kolkata")
+
+# Guards the dict below, and only the dict — this is process-local (like
+# the Dhan throttle registries in app.dhan.helpers) and resets on restart,
+# which is fine: the point is not flooding an inbox with one email per
+# 30-second poll tick while an instance keeps failing the same way, not a
+# durable delivery record.
+_error_alert_lock = threading.Lock()
+_last_error_alert_at: dict[uuid.UUID, datetime] = {}
+_ERROR_ALERT_COOLDOWN = timedelta(minutes=30)
+
+
+def _send_strategy_error_alert(user: User, user_strategy_id: uuid.UUID, strategy_name: str, error_text: str) -> None:
+    """Email the strategy's owner that a run_user_strategy() evaluation
+    pass raised — the same exception already logged with a full traceback
+    just above every call site of this function. At most one email per
+    user_strategy per _ERROR_ALERT_COOLDOWN, so a persistently-failing
+    instance (e.g. a stuck bad expiry) sends one alert per half hour, not
+    one per poll tick. Never lets a mail-server hiccup, or this function
+    itself, propagate — matches send_email()'s own "never raises" contract
+    and this module's rule that no exception here may break the scheduler.
+    """
+    now = datetime.now(timezone.utc)
+    with _error_alert_lock:
+        last_sent = _last_error_alert_at.get(user_strategy_id)
+        if last_sent is not None and now - last_sent < _ERROR_ALERT_COOLDOWN:
+            return
+        _last_error_alert_at[user_strategy_id] = now
+
+    try:
+        send_email(
+            user.email,
+            f"[FinOps Algo] Strategy error: {strategy_name}",
+            html_body=(
+                f"<p>Your strategy <b>{strategy_name}</b> hit an error while running and needs a look:</p>"
+                f"<pre style='white-space:pre-wrap'>{error_text}</pre>"
+                f"<p>It will keep retrying on its own poll schedule. You won't get another email for this "
+                f"instance for {int(_ERROR_ALERT_COOLDOWN.total_seconds() // 60)} minutes even if it keeps failing.</p>"
+            ),
+            text_body=(
+                f"Your strategy '{strategy_name}' hit an error while running and needs a look:\n\n"
+                f"{error_text}\n\n"
+                f"It will keep retrying on its own poll schedule. You won't get another email for this "
+                f"instance for {int(_ERROR_ALERT_COOLDOWN.total_seconds() // 60)} minutes even if it keeps failing."
+            ),
+        )
+    except Exception:  # noqa: BLE001 — an alerting failure must never break strategy evaluation
+        logger.exception("Failed to send strategy-error email alert for user_strategy_id=%s", user_strategy_id)
 
 
 def find_open_run(user_strategy: UserStrategy) -> StrategyRun | None:
@@ -534,9 +584,10 @@ def run_user_strategy(db: Session, user_strategy: UserStrategy) -> None:
 
         _execute_entry(db, user_dhan.client, user.id, user_strategy.id, legs, entry_params, is_live=is_live)
 
-    except Exception:
+    except Exception as exc:
         db.rollback()
         logger.exception("Error evaluating strategy %s for user %s", strategy.name, user.email)
+        _send_strategy_error_alert(user, user_strategy.id, strategy.name, f"{type(exc).__name__}: {exc}")
 
 
 def close_user_strategy_now(db: Session, user_strategy: UserStrategy) -> bool:
