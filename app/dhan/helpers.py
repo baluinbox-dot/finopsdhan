@@ -63,9 +63,21 @@ _OPTION_CHAIN_MIN_INTERVAL_SECONDS = 3.0
 _quote_state: dict[str, dict[str, Any]] = {}
 _QUOTE_MIN_INTERVAL_SECONDS = 1.0
 
-# Meta-lock guarding creation of a new per-account entry in the two dicts
-# above (not the per-account throttling itself — that's each entry's own
-# "lock", so two different accounts never block on each other here either).
+# Margin calculation (/margincalculator/multi) — its own family, separate
+# budget from quote/option-chain above; no documented per-second limit
+# found for it, so this starts at the same conservative 1/sec baseline as
+# the quote family with the same backoff on a real failure. Only ever
+# called on-demand (Dashboard page load, see app.routers.dashboard's
+# /margin endpoint) — never from the scheduler's own poll loop, so it
+# never competes with the quote/option-chain budget that every strategy's
+# actual SL/target/roll checks depend on.
+_margin_state: dict[str, dict[str, Any]] = {}
+_MARGIN_MIN_INTERVAL_SECONDS = 1.0
+
+# Meta-lock guarding creation of a new per-account entry in the throttle
+# dicts above (not the per-account throttling itself — that's each entry's
+# own "lock", so two different accounts never block on each other here
+# either).
 _throttle_registry_lock = threading.Lock()
 
 # Confirmed live 2026-08-25: even with the interval throttles above already
@@ -317,6 +329,55 @@ def fetch_spot_price(dhan_client: "dhanhq", exchange_segment: str, security_id: 
     if not quote:
         return None
     return float(quote.get("last_price", 0)) or None
+
+
+def fetch_combined_margin(dhan_client: "dhanhq", legs: list[dict[str, Any]]) -> float | None:
+    """Combined margin blocked for a group of legs *with hedge benefit*
+    applied — the real number for a spread/hedge strategy, not a naive
+    per-leg sum (which overstates it, since it ignores that a bought wing
+    reduces the margin the exchange actually requires on the sold leg
+    next to it). `legs` are plain dicts shaped like the ones stored in
+    StrategyRun.legs_planned["legs"] — needs security_id, exchange_segment,
+    transaction_type, quantity, product_type, price.
+
+    Calls Dhan's real `/margincalculator/multi` endpoint directly through
+    the client's own HTTP transport — the pinned dhanhq SDK version has no
+    first-class wrapper for it (only single-order margin_calculator()),
+    same reason app/dhan/diagnostics.py already reaches `.dhan_http`
+    directly rather than going through a higher-level SDK method.
+
+    Returns None (never raises) on any failure or if `legs` is empty —
+    callers should treat that as "not available this pass," not an error.
+    """
+    if not legs:
+        return None
+    scrip_list = [
+        {
+            "exchangeSegment": leg["exchange_segment"],
+            "transactionType": leg["transaction_type"],
+            "quantity": leg["quantity"],
+            "productType": leg["product_type"],
+            "securityId": str(leg["security_id"]),
+            "price": float(leg["price"]),
+            "triggerPrice": 0,
+        }
+        for leg in legs
+    ]
+    payload = {"includePosition": False, "includeOrder": False, "scripList": scrip_list}
+    try:
+        response = _throttled_call(
+            _margin_state, dhan_client, _MARGIN_MIN_INTERVAL_SECONDS,
+            lambda: _call_with_retry(lambda: dhan_client.dhan_http.post("/margincalculator/multi", payload)),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("margincalculator/multi call raised for %d leg(s): %s: %s", len(legs), type(exc).__name__, exc)
+        return None
+    if response.get("status") != "success":
+        logger.warning("margincalculator/multi call failed for %d leg(s): %s", len(legs), response.get("remarks") or response)
+        return None
+    data = response.get("data") or {}
+    total = data.get("totalMargin")
+    return float(total) if total is not None else None
 
 
 def fetch_expiry_list(dhan_client: "dhanhq", under_security_id: int, under_exchange_segment: str) -> list[str]:
