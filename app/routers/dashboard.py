@@ -62,7 +62,17 @@ def _pair_orders(orders: list[Order]) -> tuple[list[Order], list[tuple[Order, Or
     real (still-open) legs from Running Orders and inventing a P&L from
     two prices that were never actually a matched trade. Confirmed live
     2026-08-25 on a NIFTY 3-Pair Rolling hedge (24100 PE) that happened to
-    coincide with a rolled-in window leg on the same strike."""
+    coincide with a rolled-in window leg on the same strike.
+
+    An odd-count group's dangling last order only counts as "running" if
+    the run it belongs to is itself still open. Confirmed live 2026-08-28:
+    a SENSEX Iron Condor run picked up a duplicate closing order for one
+    leg pair at its final close event (cause not fully root-caused — an
+    old run, predates several since-shipped fixes), leaving that group
+    with an odd count even though `StrategyRun.status` was correctly
+    "closed" with a real close timestamp. Without this check, that
+    leftover reads as an open position on the Dashboard days after the
+    run actually ended — a data anomaly, not a real still-open leg."""
     groups: dict[tuple[str, str, str], list[Order]] = defaultdict(list)
     for o in orders:
         run_key = str(o.strategy_run_id) if o.strategy_run_id else f"_norun_{o.id}"
@@ -75,7 +85,10 @@ def _pair_orders(orders: list[Order]) -> tuple[list[Order], list[tuple[Order, Or
         for i in range(0, len(group) - 1, 2):
             closed.append((group[i], group[i + 1]))
         if len(group) % 2 == 1:
-            running.append(group[-1])
+            leftover = group[-1]
+            owning_run = leftover.strategy_run
+            if owning_run is None or owning_run.status == "open":
+                running.append(leftover)
 
     running.sort(key=lambda o: o.placed_at, reverse=True)
     closed.sort(key=lambda pair: pair[1].placed_at, reverse=True)

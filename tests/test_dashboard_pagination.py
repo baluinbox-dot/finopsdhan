@@ -337,6 +337,59 @@ def test_dashboard_hedge_and_primary_leg_sharing_a_contract_stay_separate(client
     assert "No closed orders today." in resp.text
 
 
+def test_dashboard_leftover_order_in_a_closed_run_does_not_show_as_running(client, db_session):
+    """Regression for a real incident (2026-08-28): a SENSEX Iron Condor
+    run's PE leg pair picked up a duplicate closing order at its final
+    close event, leaving that leg's order group with an odd count even
+    though the run itself genuinely closed (StrategyRun.status ==
+    "closed", with a real close timestamp). The dangling leftover order
+    must not be shown as a still-open position days after the run ended."""
+    user = _register_and_login(client, db_session, "trader@example.com")
+    strategy = Strategy(name="Iron Condor", code_ref="iron_condor_rolling", is_published=True)
+    db_session.add(strategy)
+    db_session.flush()
+    user_strategy = UserStrategy(user_id=user.id, strategy_id=strategy.id, mode=StrategyMode.PAPER)
+    db_session.add(user_strategy)
+    db_session.flush()
+    run = StrategyRun(
+        user_strategy_id=user_strategy.id, status="closed", legs_planned={},
+        closed_at=datetime.now(timezone.utc) - timedelta(days=1),
+    )
+    db_session.add(run)
+    db_session.flush()
+
+    now = datetime.now(timezone.utc) - timedelta(days=1)
+    db_session.add_all([
+        # Entry.
+        Order(
+            user_id=user.id, strategy_run_id=run.id, security_id="77000",
+            trading_symbol="SENSEX 77000 PE 2026-08-27", transaction_type="BUY", quantity=20,
+            order_type="LIMIT", product_type="MARGIN", price=66.00, role="primary",
+            status=OrderStatus.PAPER_FILLED, is_paper=True, placed_at=now,
+        ),
+        # Two "real" exit orders at the actual close event...
+        Order(
+            user_id=user.id, strategy_run_id=run.id, security_id="77000",
+            trading_symbol="SENSEX 77000 PE 2026-08-27", transaction_type="SELL", quantity=20,
+            order_type="LIMIT", product_type="MARGIN", price=17.40, role="primary",
+            status=OrderStatus.PAPER_FILLED, is_paper=True, placed_at=now + timedelta(hours=5),
+        ),
+        # ...plus a duplicate third order at the exact same close event --
+        # the actual bug that leaves this group with an odd count (3).
+        Order(
+            user_id=user.id, strategy_run_id=run.id, security_id="77000",
+            trading_symbol="SENSEX 77000 PE 2026-08-27", transaction_type="SELL", quantity=20,
+            order_type="LIMIT", product_type="MARGIN", price=17.40, role="primary",
+            status=OrderStatus.PAPER_FILLED, is_paper=True, placed_at=now + timedelta(hours=5),
+        ),
+    ])
+    db_session.commit()
+
+    resp = client.get("/dashboard")
+    assert resp.status_code == 200
+    assert "No running orders." in resp.text  # the closed run's dangling leftover must not appear here
+
+
 def test_dashboard_underlying_filter_narrows_my_strategies_table(client, db_session):
     """The Underlying dropdown (NIFTY/BANKNIFTY/...) scopes the "My
     Strategies" table itself, not just Running/Closed Orders."""
