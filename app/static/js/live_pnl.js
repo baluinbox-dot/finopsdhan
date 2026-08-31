@@ -128,6 +128,39 @@
         }
     }
 
+    /**
+     * Fetches /dashboard/margin ONCE, not on the repeating poll above —
+     * margin only changes when legs actually open/close/roll, not every
+     * few seconds the way price does, and computing it costs one
+     * throttled Dhan call per open position (see app/engine/pnl.py's
+     * compute_combined_margin) rather than one shared call for
+     * everything. Polling it as often as price would multiply load on
+     * the same per-account budget every strategy's own SL/target/roll
+     * checks depend on for no real benefit.
+     */
+    async function loadMarginOnce() {
+        let data;
+        try {
+            const res = await fetch((window.BASE_PATH || '') + '/dashboard/margin', { headers: { Accept: 'application/json' } });
+            if (!res.ok) return;
+            data = await res.json();
+        } catch (e) {
+            return; // transient network hiccup — the cell just stays "loading…"
+        }
+
+        (data.positions || []).forEach((pos) => {
+            const cell = document.querySelector(`[data-margin-cell="${pos.user_strategy_id}"]`);
+            if (!cell) return;
+            if (pos.margin_total === null || pos.margin_total === undefined) {
+                cell.textContent = 'unavailable';
+            } else {
+                cell.textContent = '₹' + pos.margin_total.toLocaleString('en-IN', { maximumFractionDigits: 0 });
+                cell.classList.remove('text-body-secondary');
+            }
+        });
+    }
+
     poll();
     timer = setInterval(poll, POLL_INTERVAL_MS);
+    loadMarginOnce();
 })();

@@ -13,7 +13,7 @@ from sqlalchemy import select
 from app.dhan.client import DhanNotConnectedError, get_user_dhan_client
 from app.dhan.helpers import UNDERLYINGS
 from app.deps import CurrentUser, DbSession
-from app.engine.pnl import compute_live_pnl
+from app.engine.pnl import compute_combined_margin, compute_live_pnl
 from app.engine.runner import find_open_run
 from app.models import Order, UserStrategy
 from app.templating import IST, flash, render, to_ist, url
@@ -251,6 +251,30 @@ def live_pnl(db: DbSession, current_user: CurrentUser):
         return {"positions": []}
 
     positions = compute_live_pnl(user_dhan.client, user_strategies)
+    return {"positions": positions}
+
+
+@router.get("/margin")
+def margin(db: DbSession, current_user: CurrentUser):
+    """JSON endpoint for the combined margin blocked per open position —
+    fetched once on page load (see the inline script in dashboard/index.html),
+    deliberately NOT on live-pnl's fast repeating poll: margin doesn't
+    change every few seconds the way price does (only when legs actually
+    open/close/roll), and computing it needs one throttled Dhan call per
+    open position rather than one shared call for everything, so polling
+    it as often as price would multiply load on the same per-account
+    budget every strategy's own SL/target/roll checks depend on. Never
+    raises to the client — same convention as /live-pnl."""
+    user_strategies = db.scalars(
+        select(UserStrategy).where(UserStrategy.user_id == current_user.id)
+    ).all()
+
+    try:
+        user_dhan = get_user_dhan_client(db, current_user)
+    except DhanNotConnectedError:
+        return {"positions": []}
+
+    positions = compute_combined_margin(user_dhan.client, user_strategies)
     return {"positions": positions}
 
 

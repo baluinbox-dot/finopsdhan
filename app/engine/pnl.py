@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.dhan.helpers import fetch_quotes
+from app.dhan.helpers import fetch_combined_margin, fetch_quotes
 from app.engine.runner import find_open_run
 from app.models import UserStrategy
 from app.strategies.base import leg_pnl
@@ -100,5 +100,38 @@ def compute_live_pnl(dhan_client: Any, user_strategies: list[UserStrategy]) -> l
                 "legs": leg_prices,
             }
         )
+
+    return results
+
+
+def compute_combined_margin(dhan_client: Any, user_strategies: list[UserStrategy]) -> list[dict]:
+    """Combined margin blocked (with hedge benefit) per open position, via
+    `app.dhan.helpers.fetch_combined_margin`.
+
+    Unlike `compute_live_pnl` above, this can't batch every position into
+    one shared call — margin_calculator_multi's hedge-benefit netting is
+    only meaningful *within* one position's own legs; mixing two unrelated
+    strategies' legs into one scrip_list would compute a fabricated
+    combined number that doesn't reflect either one's real standalone
+    requirement. So this is one throttled call per open position — fine
+    on-demand (a Dashboard page load), never called from the scheduler's
+    own fast poll loop."""
+    results: list[dict] = []
+    for us in user_strategies:
+        run = find_open_run(us)
+        if run is None:
+            continue
+        legs_planned = run.legs_planned or {}
+        all_legs = legs_planned.get("legs") or []
+        if not all_legs:
+            continue
+
+        leg_state = legs_planned.get("leg_state") or {}
+        open_legs = [leg for leg in all_legs if (leg_state.get(str(leg["security_id"])) or {}).get("status") != "closed"]
+        if not open_legs:
+            continue  # every leg already closed via roll/per-leg exit; whole-position close will finish it off
+
+        margin_total = fetch_combined_margin(dhan_client, open_legs)
+        results.append({"user_strategy_id": str(us.id), "margin_total": margin_total})
 
     return results
