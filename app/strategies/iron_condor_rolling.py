@@ -47,6 +47,24 @@ the tested side without the position closing on it, only the whole-run
 stop-loss/target (or the expiry-day close) eventually steps in — by
 design, this strategy never moves the tested side to chase price.
 
+Once a side has rolled, a *second, distinct* touch of the same still-open
+boundary (spot must retreat back off it and return — sitting continuously
+at/above it doesn't count as a second touch) scales the untested side's
+own sell leg in further, up to `_MAX_ADDS_PER_BOUNDARY` times (currently
+1): one more sell-only order for the same lot size, at the exact same
+strike the untested side's sell leg is already at, blended into that
+*same* leg record (combined quantity, weighted-average entry price) —
+not a second independent leg on the same contract, and not a matching
+new buy leg (the buy side's protection stays at its original size; each
+add makes the untested side's own sold quantity larger relative to its
+own wing's protection, deliberately). Tracked via `add_count`/`add_armed`
+on the same buy leg that carries `triggered_roll`. See
+`app.engine.runner._apply_increments` for why this has to blend into the
+existing leg rather than append a new one (the same security_id sharing a
+leg twice, independently, is exactly the class of bug that once made the
+Dashboard mis-pair a hedge and a primary leg — see
+`app.routers.dashboard._pair_orders`).
+
 Stop-loss/target is a single combined check against the *whole* open
 position (realized P&L so far this run + live mark-to-market on
 everything still open), in one of two modes chosen per instance:
@@ -71,6 +89,12 @@ from app.dhan.helpers import UNDERLYINGS, fetch_chain_df, fetch_quotes, fetch_sp
 from app.strategies.base import OrderLeg, Strategy, StrategyContext, leg_pnl, resolve_order_type
 
 IST = ZoneInfo("Asia/Kolkata")
+
+# How many times the untested side's sell leg can be scaled in (see the
+# module docstring's "scales the untested side's own sell leg in further"
+# section) per boundary, on top of the size it already has. 1 means the
+# sold quantity at that strike can at most double (original + one add).
+_MAX_ADDS_PER_BOUNDARY = 1
 
 
 def _now_ist() -> datetime:
@@ -356,12 +380,39 @@ class IronCondorRollingStrategy(Strategy):
         if spot is None:
             return None
 
-        # Each buy leg only ever triggers the opposite side's roll once —
-        # further polls with spot still at/beyond the same (unchanged)
-        # boundary must not keep re-rolling the side that already moved.
-        trigger_ce_side_touched = spot >= ceb_strike and not ceb_state.get("triggered_roll")
-        trigger_pe_side_touched = spot <= peb_strike and not peb_state.get("triggered_roll")
-        if not trigger_ce_side_touched and not trigger_pe_side_touched:
+        ceb_touched = spot >= ceb_strike
+        peb_touched = spot <= peb_strike
+
+        # First touch of a boundary rolls the opposite side (existing
+        # behaviour, unchanged). Once that's happened, a *later, distinct*
+        # touch of the same still-open boundary instead scales the
+        # opposite side's own sell leg in further (see module docstring) —
+        # gated by `add_armed`, which only becomes true again once spot
+        # has retreated off the boundary; sitting continuously at/above it
+        # must not keep re-arming (or re-adding) on every poll.
+        trigger_ce_side_touched = ceb_touched and not ceb_state.get("triggered_roll")
+        trigger_pe_side_touched = peb_touched and not peb_state.get("triggered_roll")
+
+        ce_add_count = int(ceb_state.get("add_count") or 0)
+        pe_add_count = int(peb_state.get("add_count") or 0)
+        ce_adds_available = ceb_state.get("triggered_roll") and ce_add_count < _MAX_ADDS_PER_BOUNDARY
+        pe_adds_available = peb_state.get("triggered_roll") and pe_add_count < _MAX_ADDS_PER_BOUNDARY
+
+        do_ce_add = ce_adds_available and ceb_touched and bool(ceb_state.get("add_armed"))
+        do_pe_add = pe_adds_available and peb_touched and bool(peb_state.get("add_armed"))
+        # Re-arm as soon as spot has retreated off a boundary that still
+        # has an add available and isn't already armed — a state-only
+        # update (see app.engine.runner._apply_rolls), no chain fetch
+        # needed for this part.
+        state_only_patch: dict[str, dict[str, Any]] = {}
+        if ce_adds_available and not ceb_touched and not ceb_state.get("add_armed"):
+            state_only_patch[ceb_sid] = {**ceb_state, "add_armed": True}
+        if pe_adds_available and not peb_touched and not peb_state.get("add_armed"):
+            state_only_patch[peb_sid] = {**peb_state, "add_armed": True}
+
+        if not (trigger_ce_side_touched or trigger_pe_side_touched or do_ce_add or do_pe_add):
+            if state_only_patch:
+                return {"rolls": [{"close_security_ids": [], "new_legs": [], "leg_state_patch": state_only_patch}]}
             return None
 
         chain_df, _ = fetch_chain_df(
@@ -384,6 +435,46 @@ class IronCondorRollingStrategy(Strategy):
             return row
 
         rolls: list[dict[str, Any]] = []
+        if state_only_patch:
+            rolls.append({"close_security_ids": [], "new_legs": [], "leg_state_patch": state_only_patch})
+        increments: list[dict[str, Any]] = []
+
+        if do_ce_add:
+            # PE side already rolled once in response to this CEB — a
+            # second, distinct touch scales its own sell leg (currently at
+            # pes_strike) in further, same lot size, blended into that
+            # same leg rather than opened as a separate one.
+            pes_row = _row(pes_strike)
+            if pes_row is not None:
+                lot_size = get_lot_size(security_id=pes_row["pe_security_id"]) or 75
+                add_quantity = lot_size * int(p["lots"])
+                increments.append({
+                    "add_leg": OrderLeg(
+                        label=f"ADD PES SELL {int(pes_strike)} PE ({expiry})", security_id=str(pes_row["pe_security_id"]),
+                        trading_symbol=f"{underlying} {int(pes_strike)} PE {expiry}", exchange_segment=meta["option_segment"],
+                        transaction_type="SELL", quantity=add_quantity, order_type=order_type, product_type="MARGIN",
+                        price=float(pes_row["pe_ltp"]), role="primary", pair_id="PE",
+                    ),
+                    "leg_state_patch": {ceb_sid: {**ceb_state, "add_count": ce_add_count + 1, "add_armed": False}},
+                })
+
+        if do_pe_add:
+            # Symmetric: CE side already rolled once in response to this
+            # PEB — a second, distinct touch scales its own sell leg
+            # (currently at ces_strike) in further.
+            ces_row = _row(ces_strike)
+            if ces_row is not None:
+                lot_size = get_lot_size(security_id=ces_row["ce_security_id"]) or 75
+                add_quantity = lot_size * int(p["lots"])
+                increments.append({
+                    "add_leg": OrderLeg(
+                        label=f"ADD CES SELL {int(ces_strike)} CE ({expiry})", security_id=str(ces_row["ce_security_id"]),
+                        trading_symbol=f"{underlying} {int(ces_strike)} CE {expiry}", exchange_segment=meta["option_segment"],
+                        transaction_type="SELL", quantity=add_quantity, order_type=order_type, product_type="MARGIN",
+                        price=float(ces_row["ce_ltp"]), role="primary", pair_id="CE",
+                    ),
+                    "leg_state_patch": {peb_sid: {**peb_state, "add_count": pe_add_count + 1, "add_armed": False}},
+                })
 
         if trigger_ce_side_touched:
             # CE side reached its outer wing -> roll the PE (untested) side
@@ -464,6 +555,9 @@ class IronCondorRollingStrategy(Strategy):
                         "leg_state_patch": {peb_sid: {**peb_state, "triggered_roll": True}},
                     })
 
-        if not rolls:
-            return None
-        return {"rolls": rolls}
+        result: dict[str, Any] = {}
+        if rolls:
+            result["rolls"] = rolls
+        if increments:
+            result["increments"] = increments
+        return result or None

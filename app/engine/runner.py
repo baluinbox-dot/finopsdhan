@@ -321,13 +321,23 @@ def _apply_rolls(
     legs are appended to `legs_planned["legs"]` (never replacing history)
     so a strategy can always see every strike a given `pair_id` has held
     today — e.g. app.strategies.three_pair_rolling's unique-spot-per-day
-    rule depends on this full history, not just what's currently open."""
+    rule depends on this full history, not just what's currently open.
+
+    A roll entry with no `close_security_ids` and no `new_legs` — just a
+    `leg_state_patch` — is also valid: a state-only update, for a
+    strategy that needs to persist its own bookkeeping (e.g. "spot
+    retreated past a boundary, arm for the next touch") on a poll where
+    nothing actually opens or closes. See
+    app.strategies.iron_condor_rolling's untested-side scale-in for the
+    case this was added for."""
     notes = dict(open_run.legs_planned or {})  # copy so reassignment below is detected as a change
     legs_data = list(notes.get("legs", []))
     leg_state: dict[str, Any] = {sid: dict(state) for sid, state in (notes.get("leg_state") or {}).items()}
 
     pnl_delta = 0.0
     any_rolled = False
+    real_roll_count = 0
+    state_only_count = 0
 
     for roll in decision.get("rolls") or []:
         close_ids = {str(sid) for sid in (roll.get("close_security_ids") or [])}
@@ -348,7 +358,11 @@ def _apply_rolls(
         # than loosening the guard for every strategy; no existing
         # evaluate_rolls implementation sets it, so this branch is
         # unreachable for them and their behavior is unchanged.
-        if not new_legs or (not to_close and not roll.get("allow_empty_close")):
+        # A roll with nothing to close and nothing to open, but a real
+        # leg_state_patch, is a deliberate state-only update (see the
+        # docstring above) — never skipped just for being otherwise empty.
+        state_only = not new_legs and not to_close and bool(roll.get("leg_state_patch"))
+        if not state_only and (not new_legs or (not to_close and not roll.get("allow_empty_close"))):
             continue  # nothing valid to do for this roll — skip it, don't half-execute
 
         if to_close:
@@ -413,6 +427,10 @@ def _apply_rolls(
             leg_state[sid] = {**_open_leg_state(sid, leg_state), **patch}
 
         any_rolled = True
+        if state_only:
+            state_only_count += 1
+        else:
+            real_roll_count += 1
 
     if not any_rolled:
         return
@@ -422,7 +440,100 @@ def _apply_rolls(
     open_run.realized_pnl = float(open_run.realized_pnl or 0) + pnl_delta
     notes["realized_pnl_so_far"] = float(open_run.realized_pnl)
     open_run.legs_planned = notes
-    open_run.evaluation_notes = f"Rolled {len(decision.get('rolls') or [])} pair(s)."
+    if real_roll_count:
+        open_run.evaluation_notes = f"Rolled {real_roll_count} pair(s)."
+    else:
+        open_run.evaluation_notes = f"Updated internal state ({state_only_count} state-only update(s), nothing opened/closed)."
+    db.commit()
+
+
+def _apply_increments(
+    db: Session,
+    dhan_client: Any,
+    user_id: Any,
+    open_run: StrategyRun,
+    decision: dict[str, Any],
+    *,
+    is_live: bool,
+) -> None:
+    """Adds quantity to an already-open leg *in place* — a true incremental
+    scale-in, not a roll. Unlike `_apply_rolls` (which always closes the
+    old leg and appends a brand new one), this places exactly one order
+    for just the added quantity and blends it into the SAME existing leg
+    record (quantity summed, price weighted-averaged) — the leg's own
+    history stays one entry throughout, never a second entry at the same
+    security_id. That distinction matters: two separate open legs sharing
+    one security_id is exactly the bug that once made the Dashboard
+    mis-pair a hedge and a primary leg as a fake closed trade (see
+    app.routers.dashboard._pair_orders) — increments avoid it by
+    construction rather than needing the Dashboard to somehow reconstruct
+    "these two entries are actually one position" after the fact.
+
+    See `Strategy.evaluate_rolls`'s `increments` key for the decision
+    shape: each entry is `{"add_leg": OrderLeg, "leg_state_patch": {...}}`
+    — `add_leg` must match an already-open leg's security_id/role/pair_id
+    exactly (found by that combination, not security_id alone, so an
+    increment can never accidentally blend into an unrelated leg that
+    happens to share a contract). No match, or the matched leg isn't
+    currently open, silently skips that one entry — never invents a
+    position to add to.
+
+    A leg that has ever received an increment carries `was_incremented:
+    True` in its own dict from then on — app.routers.dashboard._pair_orders
+    needs this to know its exit will be a single order covering the full
+    blended quantity, not one order per entry, and to reconstruct running/
+    closed status by net quantity instead of simple order-count pairing."""
+    notes = dict(open_run.legs_planned or {})
+    legs_data = list(notes.get("legs", []))
+    leg_state: dict[str, Any] = {sid: dict(state) for sid, state in (notes.get("leg_state") or {}).items()}
+
+    any_added = False
+
+    for inc in decision.get("increments") or []:
+        add_leg: OrderLeg = inc["add_leg"]
+        sid = str(add_leg.security_id)
+        existing_idx = next(
+            (
+                i for i, leg in enumerate(legs_data)
+                if str(leg["security_id"]) == sid
+                and leg.get("role") == add_leg.role
+                and leg.get("pair_id") == add_leg.pair_id
+            ),
+            None,
+        )
+        if existing_idx is None:
+            logger.warning(
+                "Skipping increment — no matching existing leg for security_id=%s role=%s pair_id=%s",
+                sid, add_leg.role, add_leg.pair_id,
+            )
+            continue
+        existing = legs_data[existing_idx]
+        if _open_leg_state(sid, leg_state)["status"] != "open":
+            logger.warning("Skipping increment — matching leg for security_id=%s is no longer open", sid)
+            continue
+
+        _place_or_paper_leg(db, dhan_client, user_id, open_run.id, add_leg, is_live=is_live)
+
+        old_qty = int(existing["quantity"])
+        old_price = float(existing["price"])
+        add_qty = int(add_leg.quantity)
+        new_qty = old_qty + add_qty
+        blended_price = (old_price * old_qty + add_leg.price * add_qty) / new_qty
+        legs_data[existing_idx] = {**existing, "quantity": new_qty, "price": blended_price, "was_incremented": True}
+
+        for patch_sid, patch in (inc.get("leg_state_patch") or {}).items():
+            patch_sid = str(patch_sid)
+            leg_state[patch_sid] = {**_open_leg_state(patch_sid, leg_state), **patch}
+
+        any_added = True
+
+    if not any_added:
+        return
+
+    notes["legs"] = legs_data
+    notes["leg_state"] = leg_state
+    open_run.legs_planned = notes
+    open_run.evaluation_notes = f"Added to {len(decision.get('increments') or [])} leg(s)."
     db.commit()
 
 
@@ -568,7 +679,10 @@ def run_user_strategy(db: Session, user_strategy: UserStrategy) -> None:
 
             roll_decision = impl.evaluate_rolls(exit_ctx, open_run.legs_planned or {})
             if roll_decision:
-                _apply_rolls(db, user_dhan.client, user.id, open_run, roll_decision, is_live=is_live)
+                if roll_decision.get("rolls"):
+                    _apply_rolls(db, user_dhan.client, user.id, open_run, roll_decision, is_live=is_live)
+                if roll_decision.get("increments"):
+                    _apply_increments(db, user_dhan.client, user.id, open_run, roll_decision, is_live=is_live)
             return
 
         entry_params = {**strategy.default_params, **user_strategy.params}

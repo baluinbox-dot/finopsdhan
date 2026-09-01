@@ -43,14 +43,30 @@ def _underlying_of(us: UserStrategy | None) -> str | None:
 def _pair_orders(orders: list[Order]) -> tuple[list[Order], list[tuple[Order, Order]]]:
     """Split a user's orders into still-open legs and entry/exit pairs.
 
-    Every leg is opened by exactly one order and, once it closes, reversed
-    by exactly one more (see app/engine/runner.py — every close/roll/leg-
-    exit path always places the opposite-side order at the same
-    security_id). Grouping by (strategy_run_id, security_id, role) and
-    pairing consecutively by fill time recovers that structure directly
-    from the order history itself — no separate bookkeeping needed, and it
-    holds equally for a plain single-shot strategy, a rolled-away leg
-    inside a still-open run, and a fully-closed run.
+    Grouping by (strategy_run_id, security_id, role) recovers each leg's
+    own order history directly from the order log itself — no separate
+    bookkeeping needed, and it holds equally for a plain single-shot
+    strategy, a rolled-away leg inside a still-open run, and a fully-closed
+    run. Within a group, orders are matched FIFO by transaction direction:
+    the group's first order establishes its "opening" side (e.g. SELL for
+    a short leg); each further same-direction order is another opening
+    chunk (the leg's original entry, or a later scale-in — see
+    app.engine.runner._apply_increments); each opposite-direction order
+    consumes pending opening chunks oldest-first, pairing each one off as
+    a closed (entry, exit) trade sharing that same exit order. A leg that
+    never scales in still reduces to exactly [entry, exit] paired the same
+    way as before. A leg that scaled in once (SELL 20, SELL 20 more, then
+    a single BUY 40 to close) produces two (entry, exit) pairs against
+    that one exit order — each showing its own real entry price and
+    quantity, both closing at the same real exit price, which is more
+    informative than a single merged row and keeps each row's P&L
+    individually correct. This assumes a closing/reversing order's
+    quantity always exactly matches some prefix sum of pending entries
+    (true for every close/roll/leg-exit/increment path in
+    app/engine/runner.py, which always reverses a leg's full currently
+    tracked quantity, never a partial amount) — a genuine partial-quantity
+    mismatch, which cannot arise from this engine's own order placement,
+    is matched best-effort rather than raising.
 
     `role` is part of the grouping key, not just security_id, because a
     hedge leg and an independently-managed primary leg (e.g. a 3-Pair
@@ -64,15 +80,16 @@ def _pair_orders(orders: list[Order]) -> tuple[list[Order], list[tuple[Order, Or
     2026-08-25 on a NIFTY 3-Pair Rolling hedge (24100 PE) that happened to
     coincide with a rolled-in window leg on the same strike.
 
-    An odd-count group's dangling last order only counts as "running" if
-    the run it belongs to is itself still open. Confirmed live 2026-08-28:
-    a SENSEX Iron Condor run picked up a duplicate closing order for one
-    leg pair at its final close event (cause not fully root-caused — an
-    old run, predates several since-shipped fixes), leaving that group
-    with an odd count even though `StrategyRun.status` was correctly
-    "closed" with a real close timestamp. Without this check, that
-    leftover reads as an open position on the Dashboard days after the
-    run actually ended — a data anomaly, not a real still-open leg."""
+    A group's still-pending (unmatched) opening orders only count as
+    "running" if the run they belong to is itself still open. Confirmed
+    live 2026-08-28: a SENSEX Iron Condor run picked up a duplicate
+    closing order for one leg pair at its final close event (cause not
+    fully root-caused — an old run, predates several since-shipped fixes),
+    leaving that group with an odd count even though `StrategyRun.status`
+    was correctly "closed" with a real close timestamp. Without this
+    check, that leftover reads as an open position on the Dashboard days
+    after the run actually ended — a data anomaly, not a real still-open
+    leg."""
     groups: dict[tuple[str, str, str], list[Order]] = defaultdict(list)
     for o in orders:
         run_key = str(o.strategy_run_id) if o.strategy_run_id else f"_norun_{o.id}"
@@ -82,10 +99,22 @@ def _pair_orders(orders: list[Order]) -> tuple[list[Order], list[tuple[Order, Or
     closed: list[tuple[Order, Order]] = []
     for group in groups.values():
         group.sort(key=lambda o: o.placed_at)
-        for i in range(0, len(group) - 1, 2):
-            closed.append((group[i], group[i + 1]))
-        if len(group) % 2 == 1:
-            leftover = group[-1]
+
+        open_side: str | None = None
+        pending: list[Order] = []  # opening-direction orders not yet matched to an exit
+
+        for o in group:
+            if open_side is None or o.transaction_type == open_side:
+                open_side = o.transaction_type
+                pending.append(o)
+                continue
+            remaining = o.quantity
+            while remaining > 0 and pending:
+                entry = pending.pop(0)
+                closed.append((entry, o))
+                remaining -= entry.quantity
+
+        for leftover in pending:
             owning_run = leftover.strategy_run
             if owning_run is None or owning_run.status == "open":
                 running.append(leftover)
