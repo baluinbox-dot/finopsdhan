@@ -269,3 +269,40 @@ def test_apply_rolls_final_close_via_close_open_run_skips_rolled_away_legs(db_se
     # Crucially, the old FIN1 24450 pair must NOT appear a second time.
     assert len([o for o in orders if o.security_id == _ce_id(24450)]) == 1
     assert len(orders) == 10
+
+
+def test_apply_rolls_state_only_patch_commits_with_nothing_opened_or_closed(db_session):
+    """A roll entry with no close_security_ids and no new_legs, just a
+    leg_state_patch, must still commit -- app.strategies.iron_condor_rolling's
+    untested-side scale-in uses this to persist "spot retreated, arm for
+    the next touch" bookkeeping on a poll where nothing actually trades."""
+    run = _make_open_run(db_session)
+    dhan = MagicMock()
+    decision = {"rolls": [{
+        "close_security_ids": [],
+        "new_legs": [],
+        "leg_state_patch": {_ce_id(24450): {"add_armed": True}},
+    }]}
+
+    _apply_rolls(db_session, dhan, run.user_strategy.user_id, run, decision, is_live=False)
+
+    db_session.refresh(run)
+    assert run.legs_planned["leg_state"][_ce_id(24450)] == {"status": "open", "add_armed": True}
+    assert "state-only" in run.evaluation_notes.lower()
+    dhan.quote_data.assert_not_called()  # nothing to close -- never needed a fresh quote
+
+
+def test_apply_rolls_truly_empty_roll_without_a_patch_is_still_skipped(db_session):
+    """Regression guard: the state-only relaxation must not become a
+    blanket "always commit" -- a roll with nothing to close, nothing to
+    open, AND no patch is still a complete no-op."""
+    run = _make_open_run(db_session)
+    dhan = MagicMock()
+    original_notes = run.legs_planned
+
+    _apply_rolls(db_session, dhan, run.user_strategy.user_id, run, {"rolls": [{"close_security_ids": [], "new_legs": []}]}, is_live=False)
+
+    db_session.refresh(run)
+    assert run.legs_planned == original_notes
+    assert run.status == "open"
+    assert db_session.query(Order).filter(Order.strategy_run_id == run.id).count() == 0

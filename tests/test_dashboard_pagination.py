@@ -390,6 +390,94 @@ def test_dashboard_leftover_order_in_a_closed_run_does_not_show_as_running(clien
     assert "No running orders." in resp.text  # the closed run's dangling leftover must not appear here
 
 
+def test_dashboard_scaled_in_leg_still_open_shows_both_entries_as_running(client, db_session):
+    """A leg that scaled in once (see app.engine.runner._apply_increments)
+    -- original entry SELL 20, then a second same-direction SELL 20 add-on,
+    neither closed yet -- must show as TWO running rows, not get
+    mis-paired against each other as a fabricated close."""
+    user = _register_and_login(client, db_session, "trader@example.com")
+    strategy = Strategy(name="Iron Condor", code_ref="iron_condor_rolling", is_published=True)
+    db_session.add(strategy)
+    db_session.flush()
+    user_strategy = UserStrategy(user_id=user.id, strategy_id=strategy.id, mode=StrategyMode.PAPER)
+    db_session.add(user_strategy)
+    db_session.flush()
+    run = StrategyRun(user_strategy_id=user_strategy.id, status="open", legs_planned={})
+    db_session.add(run)
+    db_session.flush()
+
+    now = datetime.now(timezone.utc)
+    db_session.add_all([
+        Order(
+            user_id=user.id, strategy_run_id=run.id, security_id="76600",
+            trading_symbol="SENSEX 76600 PE 2026-09-03", transaction_type="SELL", quantity=20,
+            order_type="LIMIT", product_type="MARGIN", price=100.0, role="primary",
+            status=OrderStatus.PAPER_FILLED, is_paper=True, placed_at=now - timedelta(minutes=10),
+        ),
+        Order(
+            user_id=user.id, strategy_run_id=run.id, security_id="76600",
+            trading_symbol="SENSEX 76600 PE 2026-09-03", transaction_type="SELL", quantity=20,
+            order_type="LIMIT", product_type="MARGIN", price=60.0, role="primary",
+            status=OrderStatus.PAPER_FILLED, is_paper=True, placed_at=now,
+        ),
+    ])
+    db_session.commit()
+
+    resp = client.get("/dashboard")
+    assert resp.status_code == 200
+    assert "No running orders." not in resp.text
+    assert "Showing 1 to 2 of 2 running records" in resp.text
+    assert "No closed orders today." in resp.text
+
+
+def test_dashboard_scaled_in_leg_closed_by_one_order_shows_two_closed_pairs(client, db_session):
+    """The same scaled-in leg, later closed by a single BUY covering the
+    combined quantity (40) -- must produce two (entry, exit) pairs, each
+    with its own correct entry price/quantity against the same exit price,
+    not one fabricated pair or a leftover misread as still running."""
+    user = _register_and_login(client, db_session, "trader@example.com")
+    strategy = Strategy(name="Iron Condor", code_ref="iron_condor_rolling", is_published=True)
+    db_session.add(strategy)
+    db_session.flush()
+    user_strategy = UserStrategy(user_id=user.id, strategy_id=strategy.id, mode=StrategyMode.PAPER)
+    db_session.add(user_strategy)
+    db_session.flush()
+    run = StrategyRun(user_strategy_id=user_strategy.id, status="closed", legs_planned={})
+    db_session.add(run)
+    db_session.flush()
+
+    now = datetime.now(timezone.utc)
+    db_session.add_all([
+        Order(
+            user_id=user.id, strategy_run_id=run.id, security_id="76600",
+            trading_symbol="SENSEX 76600 PE 2026-09-03", transaction_type="SELL", quantity=20,
+            order_type="LIMIT", product_type="MARGIN", price=100.0, role="primary",
+            status=OrderStatus.PAPER_FILLED, is_paper=True, placed_at=now - timedelta(minutes=10),
+        ),
+        Order(
+            user_id=user.id, strategy_run_id=run.id, security_id="76600",
+            trading_symbol="SENSEX 76600 PE 2026-09-03", transaction_type="SELL", quantity=20,
+            order_type="LIMIT", product_type="MARGIN", price=60.0, role="primary",
+            status=OrderStatus.PAPER_FILLED, is_paper=True, placed_at=now - timedelta(minutes=5),
+        ),
+        Order(
+            user_id=user.id, strategy_run_id=run.id, security_id="76600",
+            trading_symbol="SENSEX 76600 PE 2026-09-03", transaction_type="BUY", quantity=40,
+            order_type="LIMIT", product_type="MARGIN", price=30.0, role="primary",
+            status=OrderStatus.PAPER_FILLED, is_paper=True, placed_at=now,
+        ),
+    ])
+    db_session.commit()
+
+    resp = client.get("/dashboard")
+    assert resp.status_code == 200
+    assert "No running orders." in resp.text
+    assert "Showing 1 to 2 of 2 closed records" in resp.text
+    # First entry: (100-30)*20 = 1400. Second (add-on) entry: (60-30)*20 = 600.
+    assert "+1400.00" in resp.text
+    assert "+600.00" in resp.text
+
+
 def test_dashboard_underlying_filter_narrows_my_strategies_table(client, db_session):
     """The Underlying dropdown (NIFTY/BANKNIFTY/...) scopes the "My
     Strategies" table itself, not just Running/Closed Orders."""

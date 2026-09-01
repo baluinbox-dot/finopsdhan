@@ -58,51 +58,64 @@
             // Orders table — keyed "{user_strategy_id}:{security_id}",
             // distinct from the plain-UUID key above (whole-position
             // aggregate), so the two never collide on the same attribute.
+            //
+            // A leg that scaled in (see app.engine.runner._apply_increments)
+            // shows as TWO rows sharing this same key — the original entry
+            // order and the add-on order, still both open — so this uses
+            // querySelectorAll and updates every match, not just the first,
+            // each from its OWN data-entry-price/data-qty/data-side (the
+            // current *price* is shared across rows for the same contract,
+            // but each row's P&L must still use its own entry price/qty).
             (pos.legs || []).forEach((leg) => {
                 const key = `${pos.user_strategy_id}:${leg.security_id}`;
-                const priceCell = document.querySelector(`[data-price-cell="${key}"]`);
-                if (!priceCell) return;
+                const priceCells = document.querySelectorAll(`[data-price-cell="${key}"]`);
+                if (!priceCells.length) return;
 
-                const pctCell = document.querySelector(`[data-pct-cell="${key}"]`);
-                const legPnlCell = document.querySelector(`[data-pnl-cell="${key}"]`);
+                const pctCells = document.querySelectorAll(`[data-pct-cell="${key}"]`);
+                const legPnlCells = document.querySelectorAll(`[data-pnl-cell="${key}"]`);
 
-                if (leg.current_price === null || leg.current_price === undefined) {
-                    priceCell.textContent = 'pricing…';
-                    if (pctCell) pctCell.textContent = '—';
-                    // A quote fetch failing later must not leave a stale
-                    // number sitting under "Live P&L" claiming to still be
-                    // current — reset it the same way, not just the price.
-                    if (legPnlCell) {
-                        legPnlCell.textContent = 'pricing…';
-                        legPnlCell.classList.remove('text-success', 'text-danger');
-                        legPnlCell.classList.add('text-body-secondary');
+                priceCells.forEach((priceCell, i) => {
+                    const pctCell = pctCells[i];
+                    const legPnlCell = legPnlCells[i];
+
+                    if (leg.current_price === null || leg.current_price === undefined) {
+                        priceCell.textContent = 'pricing…';
+                        if (pctCell) pctCell.textContent = '—';
+                        // A quote fetch failing later must not leave a stale
+                        // number sitting under "Live P&L" claiming to still be
+                        // current — reset it the same way, not just the price.
+                        if (legPnlCell) {
+                            legPnlCell.textContent = 'pricing…';
+                            legPnlCell.classList.remove('text-success', 'text-danger');
+                            legPnlCell.classList.add('text-body-secondary');
+                        }
+                        return;
                     }
-                    return;
-                }
-                priceCell.textContent = leg.current_price.toFixed(2);
-                priceCell.classList.remove('text-body-secondary');
+                    priceCell.textContent = leg.current_price.toFixed(2);
+                    priceCell.classList.remove('text-body-secondary');
 
-                const entryPrice = parseFloat(priceCell.dataset.entryPrice);
-                const qty = parseFloat(priceCell.dataset.qty);
+                    const entryPrice = parseFloat(priceCell.dataset.entryPrice);
+                    const qty = parseFloat(priceCell.dataset.qty);
 
-                // Plain premium move (current vs entry), not P&L-adjusted for
-                // side — "how far has the price itself moved", the number a
-                // SL/target percentage is actually measured against.
-                if (pctCell && !Number.isNaN(entryPrice) && entryPrice !== 0) {
-                    const pct = ((leg.current_price - entryPrice) / entryPrice) * 100;
-                    pctCell.textContent = (pct >= 0 ? '+' : '') + pct.toFixed(1) + '%';
-                    pctCell.classList.remove('text-body-secondary', 'text-success', 'text-danger');
-                    pctCell.classList.add(pct > 0 ? 'text-success' : pct < 0 ? 'text-danger' : 'text-body-secondary');
-                }
+                    // Plain premium move (current vs entry), not P&L-adjusted for
+                    // side — "how far has the price itself moved", the number a
+                    // SL/target percentage is actually measured against.
+                    if (pctCell && !Number.isNaN(entryPrice) && entryPrice !== 0) {
+                        const pct = ((leg.current_price - entryPrice) / entryPrice) * 100;
+                        pctCell.textContent = (pct >= 0 ? '+' : '') + pct.toFixed(1) + '%';
+                        pctCell.classList.remove('text-body-secondary', 'text-success', 'text-danger');
+                        pctCell.classList.add(pct > 0 ? 'text-success' : pct < 0 ? 'text-danger' : 'text-body-secondary');
+                    }
 
-                if (legPnlCell && !Number.isNaN(entryPrice) && !Number.isNaN(qty)) {
-                    const perUnit = priceCell.dataset.side === 'SELL'
-                        ? (entryPrice - leg.current_price)
-                        : (leg.current_price - entryPrice);
-                    const legPnl = perUnit * qty;
-                    legPnlCell.textContent = formatRupees(legPnl);
-                    applyColor(legPnlCell, legPnl);
-                }
+                    if (legPnlCell && !Number.isNaN(entryPrice) && !Number.isNaN(qty)) {
+                        const perUnit = priceCell.dataset.side === 'SELL'
+                            ? (entryPrice - leg.current_price)
+                            : (leg.current_price - entryPrice);
+                        const legPnl = perUnit * qty;
+                        legPnlCell.textContent = formatRupees(legPnl);
+                        applyColor(legPnlCell, legPnl);
+                    }
+                });
             });
         });
 
