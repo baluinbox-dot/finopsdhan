@@ -351,17 +351,33 @@ def test_pe_scale_in_lands_below_atm_when_offset_is_negative():
     assert int(new_leg.trading_symbol.split()[1]) == 23900  # ATM (24000) - 100
 
 
-def test_ce_scale_in_lands_at_the_configured_offset():
+def test_ce_scale_in_lands_below_atm_when_offset_is_positive():
+    """CE scale-in's formula is ATM - offset (subtracted, unlike PE's ATM +
+    offset) so that a positive value moves the new leg *toward* spot in
+    both cases -- PEB is below ATM, so + here means down, same direction
+    spot just moved to trigger this side."""
     strategy = IronFlyAdjustmentsStrategy()
     dhan = _mock_dhan_client(spot=23700.0)  # spot at PEB -> scale in CE side
-    ctx = StrategyContext(dhan_client=dhan, params={"expiry": FUTURE_EXPIRY, "ce_scale_in_offset_points": -100})
+    ctx = StrategyContext(dhan_client=dhan, params={"expiry": FUTURE_EXPIRY, "ce_scale_in_offset_points": 100})
 
     decision = strategy.evaluate_rolls(ctx, _fly_notes())
 
     assert decision is not None
     new_leg = decision["rolls"][0]["new_legs"][0]
     assert new_leg.pair_id == "CE"
-    assert int(new_leg.trading_symbol.split()[1]) == 23900  # ATM (24000) - 100, still a CE strike below ATM
+    assert int(new_leg.trading_symbol.split()[1]) == 23900  # ATM (24000) - 100
+
+
+def test_ce_scale_in_lands_above_atm_when_offset_is_negative():
+    strategy = IronFlyAdjustmentsStrategy()
+    dhan = _mock_dhan_client(spot=23700.0)
+    ctx = StrategyContext(dhan_client=dhan, params={"expiry": FUTURE_EXPIRY, "ce_scale_in_offset_points": -100})
+
+    decision = strategy.evaluate_rolls(ctx, _fly_notes())
+
+    assert decision is not None
+    new_leg = decision["rolls"][0]["new_legs"][0]
+    assert int(new_leg.trading_symbol.split()[1]) == 24100  # ATM (24000) - (-100)
 
 
 def test_scale_in_offset_of_zero_still_lands_on_the_original_atm_strike():

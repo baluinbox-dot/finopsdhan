@@ -1475,7 +1475,7 @@ def configure_iron_fly_form(
                     peb = min(strikes, key=lambda x: abs(x - (atm_strike - pe_wing_offset)))
                     ce_scale_in_offset = float(params.get("ce_scale_in_offset_points") or 0)
                     pe_scale_in_offset = float(params.get("pe_scale_in_offset_points") or 0)
-                    ce_scale_in_strike = min(strikes, key=lambda x: abs(x - (atm_strike + ce_scale_in_offset)))
+                    ce_scale_in_strike = min(strikes, key=lambda x: abs(x - (atm_strike - ce_scale_in_offset)))
                     pe_scale_in_strike = min(strikes, key=lambda x: abs(x - (atm_strike + pe_scale_in_offset)))
                     row = chain_df[chain_df["strike"] == atm_strike].iloc[0]
                     ce_ltp = row.get("ce_ltp")
