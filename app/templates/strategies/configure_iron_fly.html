@@ -1,0 +1,212 @@
+{% extends "base.html" %}
+{% block title %}Configure {{ strategy.name }} — FinOps Algo{% endblock %}
+{% block content %}
+<h4 class="mb-1">{{ 'Reconfigure: ' ~ (existing.label or strategy.name) if existing else 'Add New Instance: ' ~ strategy.name }}</h4>
+<p class="text-body-secondary">{{ strategy.description }}</p>
+{% if not existing %}
+<p class="small text-body-secondary">
+    This creates a <strong>new, independent instance</strong> — any other instances of this strategy you already have
+    running keep running untouched.
+</p>
+{% endif %}
+
+{% if not has_dhan %}
+<div class="alert alert-warning">
+    Connect your Dhan account on the <a href="{{ url('/settings/dhan') }}">Settings page</a> before configuring this strategy —
+    the expiry and strike info below is fetched live from your own Dhan connection.
+</div>
+{% else %}
+
+<div class="card stat-card mb-3" style="max-width: 720px;">
+    <div class="card-body">
+        <form method="get" action="{{ url('/strategies/' ~ strategy.id ~ '/configure-iron-fly') }}" class="row g-2 align-items-end">
+            <input type="hidden" name="user_strategy_id" value="{{ user_strategy_id }}">
+            <div class="col-auto">
+                <label class="form-label small mb-0">Underlying</label>
+                <select name="underlying" class="form-select form-select-sm" onchange="this.form.submit()">
+                    {% for key, meta in underlyings.items() %}
+                    <option value="{{ key }}" {{ 'selected' if key == selected_underlying else '' }}>{{ meta.label }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-auto">
+                <label class="form-label small mb-0">Expiry Type</label>
+                <select name="expiry_type" class="form-select form-select-sm" onchange="this.form.submit()">
+                    <option value="weekly" {{ 'selected' if selected_expiry_type == 'weekly' else '' }}>Weekly</option>
+                    <option value="monthly" {{ 'selected' if selected_expiry_type == 'monthly' else '' }}>Monthly</option>
+                </select>
+            </div>
+            <div class="col-auto">
+                <label class="form-label small mb-0">Expiry</label>
+                <select name="expiry" class="form-select form-select-sm" onchange="this.form.submit()" {{ 'disabled' if not expiries else '' }}>
+                    {% for exp in expiries %}
+                    <option value="{{ exp }}" {{ 'selected' if exp == selected_expiry else '' }}>{{ exp }}</option>
+                    {% else %}
+                    <option>No {{ selected_expiry_type }} expiries available</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-auto">
+                <button class="btn btn-outline-secondary btn-sm" type="submit">Refresh Premium / Strikes</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+{% if expiry_error %}
+<div class="alert alert-danger">{{ expiry_error }}</div>
+{% endif %}
+
+{% if fly_preview %}
+<div class="alert alert-info">
+    Spot <strong>{{ '%.2f'|format(fly_preview.spot) }}</strong> · ATM strike <strong>{{ fly_preview.atm | int }}</strong> ·
+    CE <strong>₹{{ '%.2f'|format(fly_preview.ce_ltp or 0) }}</strong> + PE <strong>₹{{ '%.2f'|format(fly_preview.pe_ltp or 0) }}</strong>
+    {% if fly_preview.combined is not none %}
+    = combined <strong>₹{{ '%.2f'|format(fly_preview.combined) }}</strong> right now (CES+PES premium — reference only,
+    entry does not wait on this).
+    {% endif %}
+    At the wing offsets below, the wings would be CEB (buy) <strong>{{ fly_preview.ceb | int }}</strong> and
+    PEB (buy) <strong>{{ fly_preview.peb | int }}</strong>. At the scale-in offsets below, a PE scale-in would land
+    at <strong>{{ fly_preview.pe_scale_in_strike | int }}</strong> and a CE scale-in at
+    <strong>{{ fly_preview.ce_scale_in_strike | int }}</strong> — change any of these and refresh to see them move.
+</div>
+{% endif %}
+
+<div class="card stat-card" style="max-width: 720px;">
+    <div class="card-body">
+        <form method="post" action="{{ url('/strategies/' ~ strategy.id ~ '/configure-iron-fly') }}" class="row g-3">
+            <input type="hidden" name="user_strategy_id" value="{{ user_strategy_id }}">
+            <input type="hidden" name="underlying" value="{{ selected_underlying }}">
+            <input type="hidden" name="expiry_type" value="{{ selected_expiry_type }}">
+            <input type="hidden" name="expiry" value="{{ selected_expiry }}">
+
+            <div class="col-12">
+                <div class="small text-body-secondary mb-1">
+                    {{ underlyings[selected_underlying].label }} · Iron Fly · scale-in adjustments ·
+                    {{ selected_expiry_type }} · {{ selected_expiry or 'no expiry selected' }}
+                </div>
+            </div>
+
+            <div class="col-12">
+                <label class="form-label">Instance Name</label>
+                <input type="text" name="label" value="{{ existing.label if existing else '' }}" maxlength="120"
+                       class="form-control" placeholder="e.g. NIFTY Iron Fly — auto-generated if left blank">
+            </div>
+
+            <div class="col-md-4">
+                <label class="form-label">Lots</label>
+                <input type="number" name="lots" min="1" value="{{ params.lots }}" class="form-control">
+            </div>
+            <div class="col-md-4">
+                <label class="form-label">Start Time</label>
+                <input type="time" name="start_time" value="{{ params.start_time }}" class="form-control">
+                <div class="form-text">Daily window for the first entry — not a daily close time.</div>
+            </div>
+            <div class="col-md-4">
+                <label class="form-label">End Time</label>
+                <input type="time" name="end_time" value="{{ params.end_time }}" class="form-control">
+                <div class="form-text">Daily entry window end, and the force-close time on <strong>expiry day only</strong>.</div>
+            </div>
+            <div class="col-12 small text-body-secondary">
+                This is <strong>not an intraday strategy</strong> — once entered, the position (and any scale-ins) stays
+                open across multiple days and is only force-closed on the expiry day itself, at End Time above (or by
+                the stop-loss/target below, whichever comes first). Legs are placed as carry-forward (MARGIN), not
+                INTRADAY, so the broker doesn't square them off overnight.
+            </div>
+
+            <div class="col-12"><hr></div>
+
+            <div class="col-12 small text-body-secondary">
+                CES and PES both sell at the <strong>same ATM strike</strong> (a short straddle). CEB and PEB each buy a
+                wing at the point distance you set below — independently per side, so an asymmetric fly (e.g. a 100-pt
+                call wing with a 300-pt put wing) is fine.
+            </div>
+            <div class="col-md-6">
+                <label class="form-label">CE Wing Offset (pts)</label>
+                <input type="number" step="1" min="1" name="ce_wing_offset_points" value="{{ params.ce_wing_offset_points }}" class="form-control">
+                <div class="form-text">CEB strike = ATM + this.</div>
+            </div>
+            <div class="col-md-6">
+                <label class="form-label">PE Wing Offset (pts)</label>
+                <input type="number" step="1" min="1" name="pe_wing_offset_points" value="{{ params.pe_wing_offset_points }}" class="form-control">
+                <div class="form-text">PEB strike = ATM &minus; this.</div>
+            </div>
+            <div class="col-12 small text-body-secondary">
+                Adjustment is a <strong>scale-in</strong>, not a roll: if spot reaches CEB, the CE side is left alone and
+                one more PES is added, riding the existing PEB. Symmetrically, spot reaching PEB adds one more CES,
+                riding the existing CEB. Each side scales in at most once per run.
+            </div>
+            <div class="col-md-6">
+                <label class="form-label">PE Scale-In Offset (pts)</label>
+                <input type="number" step="1" name="pe_scale_in_offset_points" value="{{ params.pe_scale_in_offset_points }}" class="form-control">
+                <div class="form-text">New PES strike (added when CEB is touched) = ATM + this. Signed — positive lands above ATM, negative below, 0 = the original ATM strike.</div>
+            </div>
+            <div class="col-md-6">
+                <label class="form-label">CE Scale-In Offset (pts)</label>
+                <input type="number" step="1" name="ce_scale_in_offset_points" value="{{ params.ce_scale_in_offset_points }}" class="form-control">
+                <div class="form-text">New CES strike (added when PEB is touched) = ATM + this. Signed — positive lands above ATM, negative below, 0 = the original ATM strike.</div>
+            </div>
+
+            <div class="col-12"><hr></div>
+
+            <div class="col-md-4">
+                <label class="form-label">Stop-Loss / Target Basis</label>
+                <select name="sl_target_mode" class="form-select">
+                    <option value="fixed" {{ 'selected' if params.sl_target_mode == 'fixed' else '' }}>Fixed &#8377;</option>
+                    <option value="pct" {{ 'selected' if params.sl_target_mode == 'pct' else '' }}>% of Total Premium Collected</option>
+                </select>
+                <div class="form-text">
+                    "% of Total Premium Collected" is measured against the running net credit collected across the
+                    initial entry plus every scale-in add so far.
+                </div>
+            </div>
+            <div class="col-md-4">
+                <label class="form-label">Stop-Loss</label>
+                <input type="number" step="1" name="stop_loss_value" value="{{ params.stop_loss_value }}" class="form-control">
+                <div class="form-text">Rupees or %, per the basis above. 0 disables it.</div>
+            </div>
+            <div class="col-md-4">
+                <label class="form-label">Target</label>
+                <input type="number" step="1" name="target_value" value="{{ params.target_value }}" class="form-control">
+                <div class="form-text">Rupees or %, per the basis above. 0 disables it.</div>
+            </div>
+            <div class="col-12 small text-body-secondary">
+                Checked continuously against the <strong>combined</strong> live P&amp;L across everything still open
+                plus everything already realized this run (across every day it's been open) — whichever hits first
+                closes every remaining leg and ends the position, before expiry if needed.
+            </div>
+
+            <div class="col-12"><hr></div>
+
+            <div class="col-12">
+                <label class="form-label">Order Type</label>
+                <select name="order_type" class="form-select">
+                    <option value="LIMIT" {{ 'selected' if params.order_type != 'MARKET' else '' }}>Limit (safe default — no fill if price moves away)</option>
+                    <option value="MARKET" {{ 'selected' if params.order_type == 'MARKET' else '' }}>Market (fills immediately, no price protection)</option>
+                </select>
+            </div>
+
+            <div class="col-12">
+                <label class="form-label">Mode</label>
+                <select name="mode" class="form-select">
+                    <option value="paper" selected>Paper (simulated)</option>
+                    <option value="live">Live</option>
+                </select>
+            </div>
+            <div class="col-12 form-check">
+                <input type="checkbox" class="form-check-input" id="liveConfirmed" name="live_confirmed" value="true">
+                <label class="form-check-label text-danger" for="liveConfirmed">
+                    I understand Live mode places real orders with real money on my connected Dhan account. Required to actually go live — otherwise this stays in Paper mode regardless of the Mode selected above.
+                </label>
+            </div>
+
+            <div class="col-12 mt-2">
+                <button id="configureSubmitBtn" class="btn btn-primary w-100" type="submit" {{ 'disabled' if not selected_expiry else '' }}>
+                    {{ 'Update Configuration' if existing else 'Save and Enable' }}
+                </button>
+            </div>
+        </form>
+    </div>
+</div>
+{% endif %}
+{% endblock %}
