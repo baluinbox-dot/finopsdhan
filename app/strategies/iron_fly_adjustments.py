@@ -19,10 +19,15 @@ of rolling or closing anything. Balu's spec, paraphrased:
     touched — instead, one more PES is added, riding the existing PEB
     for protection rather than buying a fresh wing. Symmetrically, spot
     reaching PEB adds one more CES, riding the existing CEB. The new
-    leg's strike is `ATM + <side>_scale_in_offset_points` (signed —
-    positive lands above ATM, negative below, 0 lands exactly on ATM,
-    i.e. the same strike the original PES/CES already sits at, which is
-    the default). Each side scales in **at most once per run** — once
+    leg's strike is signed points from ATM (0 lands exactly on ATM, i.e.
+    the same strike the original PES/CES already sits at, which is the
+    default) — new PES = `ATM + pe_scale_in_offset_points`, new CES =
+    `ATM - ce_scale_in_offset_points`. The signs are deliberately
+    opposite each other, not mirrored: a positive value always moves the
+    new leg *toward* the side that just got touched (PE scale-in fires
+    off CEB, above ATM, so + moves it up; CE scale-in fires off PEB,
+    below ATM, so + moves it down) — negative always moves it away from
+    spot instead. Each side scales in **at most once per run** — once
     CEB has triggered a PE-side add, further polls with spot still
     at/beyond that same CEB do not add again (mirrors Iron Condor
     Rolling's `triggered_roll` guard, called `scaled_in` here); CEB/PEB
@@ -109,11 +114,16 @@ class IronFlyAdjustmentsStrategy(Strategy):
         "end_time": "14:45",  # daily entry-window end, AND the force-close time on the expiry day itself
         "ce_wing_offset_points": 300,  # CEB strike = ATM + this
         "pe_wing_offset_points": 300,  # PEB strike = ATM - this (independent of the CE side)
-        # Where each side's scale-in leg lands, signed points from ATM
-        # (positive = above ATM, negative = below, 0 = original ATM strike
-        # -- same strike PES/CES already sits at, the pre-existing default
-        # behavior). Independent per side, same as the wing offsets.
-        "ce_scale_in_offset_points": 0,  # new CES strike = ATM + this (added when PEB is touched)
+        # Where each side's scale-in leg lands, signed points from ATM, 0 =
+        # original ATM strike (same strike PES/CES already sits at, the
+        # pre-existing default behavior). Independent per side, and their
+        # signs are deliberately opposite each other (not mirrored like the
+        # wing offsets): a positive value always moves the new leg *toward*
+        # the side that just got tested/touched -- PE scale-in fires when
+        # CEB (above ATM) is touched, so + moves it up, toward spot; CE
+        # scale-in fires when PEB (below ATM) is touched, so + moves it
+        # down, toward spot. Negative always moves it away from spot.
+        "ce_scale_in_offset_points": 0,  # new CES strike = ATM - this (added when PEB is touched)
         "pe_scale_in_offset_points": 0,  # new PES strike = ATM + this (added when CEB is touched)
         "sl_target_mode": "fixed",  # "fixed" (rupees) | "pct" (of total premium collected this run so far)
         "stop_loss_value": 10000,
@@ -414,11 +424,14 @@ class IronFlyAdjustmentsStrategy(Strategy):
         if trigger_pe_side_touched:
             # Symmetric: PE side reached its wing -> scale in the CE
             # (untested) side — one more CES, riding the existing CEB.
-            # Strike = ATM + ce_scale_in_offset (signed; 0 = original ATM).
+            # Strike = ATM - ce_scale_in_offset (signed; 0 = original ATM;
+            # subtracted rather than added so a positive value still moves
+            # the new leg toward spot, i.e. down, matching the direction
+            # PEB itself was touched in).
             atm_strike = _strike_of(ces_legs[0])
             if atm_strike is not None:
                 ce_scale_in_offset = float(p.get("ce_scale_in_offset_points") or 0)
-                new_strike = _nearest_strike(strikes_avail, atm_strike + ce_scale_in_offset)
+                new_strike = _nearest_strike(strikes_avail, atm_strike - ce_scale_in_offset)
                 row = _row(new_strike)
                 if row is not None:
                     lot_size = get_lot_size(security_id=row["ce_security_id"]) or 75
