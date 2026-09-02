@@ -1389,6 +1389,237 @@ def configure_iron_condor_submit(
     return RedirectResponse(url("/strategies"), status_code=303)
 
 
+@router.get("/{strategy_id}/configure-iron-fly")
+def configure_iron_fly_form(
+    request: Request,
+    db: DbSession,
+    current_user: CurrentUser,
+    strategy_id: uuid.UUID,
+    user_strategy_id: str = "",
+    underlying: str = "",
+    expiry: str = "",
+    expiry_type: str = "",
+):
+    strategy = db.get(Strategy, strategy_id)
+    if strategy is None or not strategy.is_published:
+        flash(request, "Strategy not found.", "error")
+        return RedirectResponse(url("/strategies"), status_code=303)
+
+    existing: UserStrategy | None = None
+    if user_strategy_id:
+        try:
+            existing = db.get(UserStrategy, uuid.UUID(user_strategy_id))
+        except ValueError:
+            existing = None
+        if existing is None or existing.user_id != current_user.id or existing.strategy_id != strategy_id:
+            flash(request, "Strategy instance not found.", "error")
+            return RedirectResponse(url("/strategies"), status_code=303)
+
+    existing_params = existing.params if existing else {}
+    underlying = (underlying or existing_params.get("underlying") or "NIFTY").upper()
+    if underlying not in UNDERLYINGS:
+        underlying = "NIFTY"
+    expiry_type = (expiry_type or existing_params.get("expiry_type") or "weekly").lower()
+    if expiry_type not in ("weekly", "monthly"):
+        expiry_type = "weekly"
+    if not expiry:
+        expiry = existing_params.get("expiry") or ""
+
+    has_dhan = current_user.dhan_credential is not None and current_user.dhan_credential.is_active
+
+    try:
+        strategy_cls = get_strategy_class(strategy.code_ref)
+        class_defaults = strategy_cls.default_params
+    except ValueError:
+        class_defaults = {}
+    params = {**class_defaults, **strategy.default_params, **existing_params}
+    params["underlying"] = underlying
+    params["expiry_type"] = expiry_type
+
+    all_expiries: list[str] = []
+    expiries: list[str] = []
+    expiry_error: str | None = None
+    fly_preview: dict | None = None
+    selected_expiry = expiry
+
+    if has_dhan:
+        try:
+            user_dhan = get_user_dhan_client(db, current_user)
+            all_expiries = list_expiries(user_dhan.client, underlying)
+        except DhanNotConnectedError as exc:
+            expiry_error = str(exc)
+        except Exception as exc:  # noqa: BLE001
+            expiry_error = f"Could not fetch expiries from Dhan: {exc}"
+
+        expiry_labels = _classify_expiries(all_expiries)
+        expiries = [e for e in all_expiries if expiry_labels.get(e) == expiry_type]
+
+        if selected_expiry not in expiries:
+            selected_expiry = expiries[0] if expiries else ""
+
+        if selected_expiry and selected_expiry in expiries:
+            try:
+                meta = UNDERLYINGS[underlying]
+                chain_df, spot = fetch_chain_df(
+                    user_dhan.client,
+                    under_security_id=meta["security_id"],
+                    expiry=selected_expiry,
+                    under_exchange_segment=meta["exchange_segment"],
+                )
+                if not chain_df.empty:
+                    strikes = sorted(chain_df["strike"].tolist())
+                    atm_strike = min(strikes, key=lambda x: abs(x - spot))
+                    ce_wing_offset = float(params.get("ce_wing_offset_points") or 300)
+                    pe_wing_offset = float(params.get("pe_wing_offset_points") or 300)
+                    ceb = min(strikes, key=lambda x: abs(x - (atm_strike + ce_wing_offset)))
+                    peb = min(strikes, key=lambda x: abs(x - (atm_strike - pe_wing_offset)))
+                    ce_scale_in_offset = float(params.get("ce_scale_in_offset_points") or 0)
+                    pe_scale_in_offset = float(params.get("pe_scale_in_offset_points") or 0)
+                    ce_scale_in_strike = min(strikes, key=lambda x: abs(x - (atm_strike + ce_scale_in_offset)))
+                    pe_scale_in_strike = min(strikes, key=lambda x: abs(x - (atm_strike + pe_scale_in_offset)))
+                    row = chain_df[chain_df["strike"] == atm_strike].iloc[0]
+                    ce_ltp = row.get("ce_ltp")
+                    pe_ltp = row.get("pe_ltp")
+                    fly_preview = {
+                        "spot": spot,
+                        "atm": atm_strike,
+                        "ceb": ceb,
+                        "peb": peb,
+                        "ce_scale_in_strike": ce_scale_in_strike,
+                        "pe_scale_in_strike": pe_scale_in_strike,
+                        "ce_ltp": ce_ltp,
+                        "pe_ltp": pe_ltp,
+                        "combined": (float(ce_ltp) + float(pe_ltp)) if ce_ltp is not None and pe_ltp is not None else None,
+                    }
+            except Exception as exc:  # noqa: BLE001 — preview is a nice-to-have, never block the form
+                expiry_error = expiry_error or f"Could not fetch live strikes: {exc}"
+
+    return render(
+        request,
+        "strategies/configure_iron_fly.html",
+        {
+            "current_user": current_user,
+            "user_strategy_id": user_strategy_id,
+            "strategy": strategy,
+            "has_dhan": has_dhan,
+            "underlyings": UNDERLYINGS,
+            "selected_underlying": underlying,
+            "selected_expiry_type": expiry_type,
+            "selected_expiry": selected_expiry,
+            "expiries": expiries,
+            "expiry_error": expiry_error,
+            "fly_preview": fly_preview,
+            "params": params,
+            "existing": existing,
+        },
+    )
+
+
+@router.post("/{strategy_id}/configure-iron-fly")
+def configure_iron_fly_submit(
+    request: Request,
+    db: DbSession,
+    current_user: CurrentUser,
+    strategy_id: uuid.UUID,
+    user_strategy_id: str = Form(""),
+    label: str = Form(""),
+    underlying: str = Form(...),
+    expiry_type: str = Form("weekly"),
+    expiry: str = Form(...),
+    lots: int = Form(1),
+    start_time: str = Form("09:20"),
+    end_time: str = Form("14:45"),
+    ce_wing_offset_points: float = Form(300),
+    pe_wing_offset_points: float = Form(300),
+    ce_scale_in_offset_points: float = Form(0),
+    pe_scale_in_offset_points: float = Form(0),
+    sl_target_mode: str = Form("fixed"),
+    stop_loss_value: float = Form(10000),
+    target_value: float = Form(15000),
+    order_type: str = Form("LIMIT"),
+    live_confirmed: bool = Form(False),
+    mode: str = Form("paper"),
+):
+    strategy = db.get(Strategy, strategy_id)
+    if strategy is None or not strategy.is_published:
+        flash(request, "Strategy not found.", "error")
+        return RedirectResponse(url("/strategies"), status_code=303)
+
+    if not current_user.dhan_credential or not current_user.dhan_credential.is_active:
+        flash(request, "Connect your Dhan account on the Settings page before enabling a strategy.", "error")
+        return RedirectResponse(url("/strategies"), status_code=303)
+
+    if underlying.upper() not in UNDERLYINGS:
+        flash(request, "Unknown underlying.", "error")
+        return RedirectResponse(url(f"/strategies/{strategy_id}/configure-iron-fly"), status_code=303)
+
+    if not expiry:
+        flash(request, "Pick an expiry before saving.", "error")
+        redirect_url = f"/strategies/{strategy_id}/configure-iron-fly?underlying={underlying}"
+        if user_strategy_id:
+            redirect_url += f"&user_strategy_id={user_strategy_id}"
+        return RedirectResponse(url(redirect_url), status_code=303)
+
+    if ce_wing_offset_points <= 0 or pe_wing_offset_points <= 0:
+        flash(request, "Both wing offsets must be greater than zero.", "error")
+        redirect_url = f"/strategies/{strategy_id}/configure-iron-fly?underlying={underlying}&expiry={expiry}"
+        if user_strategy_id:
+            redirect_url += f"&user_strategy_id={user_strategy_id}"
+        return RedirectResponse(url(redirect_url), status_code=303)
+
+    requested_mode = _resolve_requested_mode(request, mode, live_confirmed)
+
+    params = {
+        "underlying": underlying.upper(),
+        "expiry_type": "monthly" if expiry_type == "monthly" else "weekly",
+        "expiry": expiry,
+        "lots": lots,
+        "start_time": start_time,
+        "end_time": end_time,
+        "ce_wing_offset_points": ce_wing_offset_points,
+        "pe_wing_offset_points": pe_wing_offset_points,
+        "ce_scale_in_offset_points": ce_scale_in_offset_points,
+        "pe_scale_in_offset_points": pe_scale_in_offset_points,
+        "sl_target_mode": "pct" if sl_target_mode == "pct" else "fixed",
+        "stop_loss_value": stop_loss_value,
+        "target_value": target_value,
+        "order_type": "MARKET" if order_type == "MARKET" else "LIMIT",
+    }
+
+    existing: UserStrategy | None = None
+    if user_strategy_id:
+        try:
+            existing = db.get(UserStrategy, uuid.UUID(user_strategy_id))
+        except ValueError:
+            existing = None
+        if existing is None or existing.user_id != current_user.id or existing.strategy_id != strategy_id:
+            flash(request, "Strategy instance not found.", "error")
+            return RedirectResponse(url("/strategies"), status_code=303)
+
+    final_label = label.strip() or f"Iron Fly Adjustments {params['underlying']}"
+
+    if existing:
+        existing.label = final_label
+        existing.params = params
+        existing.mode = requested_mode
+        existing.is_active = True
+    else:
+        db.add(
+            UserStrategy(
+                user_id=current_user.id,
+                strategy_id=strategy_id,
+                label=final_label,
+                params=params,
+                mode=requested_mode,
+                is_active=True,
+            )
+        )
+    db.commit()
+
+    flash(request, f"{final_label} configured and enabled in {requested_mode.value} mode.", "success")
+    return RedirectResponse(url("/strategies"), status_code=303)
+
+
 # --- Superadmin: publish/manage strategy definitions ---
 
 
