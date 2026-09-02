@@ -65,7 +65,15 @@ from app.dhan.helpers import (
     find_strike_by_nearest_premium,
     get_lot_size,
 )
-from app.strategies.base import OrderLeg, Strategy, StrategyContext, leg_pnl, resolve_order_type
+from app.strategies.base import (
+    OrderLeg,
+    Strategy,
+    StrategyContext,
+    currently_open_legs,
+    dedupe_legs_by_security_id,
+    leg_pnl,
+    resolve_order_type,
+)
 
 IST = ZoneInfo("Asia/Kolkata")
 
@@ -269,10 +277,8 @@ class ThreePairRollingLegSLTargetStrategy(Strategy):
         target_pct = float(p.get("leg_target_pct") or 0)
 
         open_legs = [
-            leg for leg in legs
-            if leg.get("role") == "primary"
-            and _leg_state(str(leg["security_id"]), leg_state)["status"] == "open"
-            and _in_window(str(leg["security_id"]), leg_state)
+            leg for leg in currently_open_legs(legs, leg_state)
+            if leg.get("role") == "primary" and _in_window(str(leg["security_id"]), leg_state)
         ]
         if not open_legs:
             return None
@@ -333,7 +339,7 @@ class ThreePairRollingLegSLTargetStrategy(Strategy):
             return True
 
         leg_state = open_run_notes.get("leg_state") or {}
-        open_legs = [leg for leg in legs if _leg_state(str(leg["security_id"]), leg_state)["status"] == "open"]
+        open_legs = currently_open_legs(legs, leg_state)
         if not open_legs:
             return False
 
@@ -391,8 +397,12 @@ class ThreePairRollingLegSLTargetStrategy(Strategy):
         # counts as an active slot until an actual roll moves it away (see
         # module docstring). Hedge legs don't apply here (this strategy has
         # none), but the role check is kept for parity with the sibling.
+        # dedupe_legs_by_security_id first, same reason as everywhere else
+        # in this file: legs is append-only, so a strike revisited after an
+        # earlier roll away has two history entries sharing one security_id,
+        # and leg_state (in_window included) only tracks the latest one.
         window_groups: dict[float, list[dict]] = {}
-        for leg in legs:
+        for leg in dedupe_legs_by_security_id(legs):
             if leg.get("role") != "primary":
                 continue
             sid = str(leg["security_id"])

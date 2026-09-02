@@ -269,3 +269,78 @@ def test_apply_rolls_final_close_via_close_open_run_skips_rolled_away_legs(db_se
     # Crucially, the old FIN1 24450 pair must NOT appear a second time.
     assert len([o for o in orders if o.security_id == _ce_id(24450)]) == 1
     assert len(orders) == 10
+
+
+def test_a_revisited_security_id_is_only_reversed_once_on_final_close(db_session):
+    """Regression: spot can roll a strike away and later roll right back to
+    it (e.g. FIN1 shifts 24450 -> 24300 -> back to 24450), giving that one
+    security_id *two* entries in legs_planned["legs"] history -- the first
+    closed, the second genuinely open. leg_state only tracks each
+    security_id's latest status, so before app.strategies.base.
+    currently_open_legs existed, a raw "status != closed" filter matched
+    BOTH history entries once the strike came back (the second roll's
+    leg_state[sid] = {"status": "open"} clobbers the earlier "closed"
+    record) -- _close_open_run then placed *two* exit orders for one
+    physical leg, corrupting realized P&L and (in live mode) sending a
+    real duplicate reversing order. Confirmed live on 4 production
+    positions 2026-09-02 before this fix (all paper mode)."""
+    run = _make_open_run(db_session)
+    dhan = MagicMock()
+
+    # Roll 1: FIN1 24450 -> 24300 (closes 24450, opens 24300).
+    dhan.quote_data.return_value = {
+        "status": "success",
+        "data": {"status": "success", "data": {"NSE_FNO": {_ce_id(24450): {"last_price": 40.0}, _pe_id(24450): {"last_price": 70.0}}}},
+    }
+    _apply_rolls(
+        db_session, dhan, run.user_strategy.user_id, run,
+        {"rolls": [{"close_security_ids": [_ce_id(24450), _pe_id(24450)], "new_legs": _roll_leg("FIN1", 24300, 90.0)}]},
+        is_live=False,
+    )
+    db_session.refresh(run)
+
+    # Roll 2: spot reverses -- FIN1 24300 -> back to 24450 (the exact same
+    # security_id closed by Roll 1, given a fresh entry price this time).
+    dhan.quote_data.return_value = {
+        "status": "success",
+        "data": {"status": "success", "data": {"NSE_FNO": {_ce_id(24300): {"last_price": 95.0}, _pe_id(24300): {"last_price": 12.0}}}},
+    }
+    _apply_rolls(
+        db_session, dhan, run.user_strategy.user_id, run,
+        {"rolls": [{"close_security_ids": [_ce_id(24300), _pe_id(24300)], "new_legs": _roll_leg("FIN1", 24450, 65.0)}]},
+        is_live=False,
+    )
+    db_session.refresh(run)
+
+    # legs_planned["legs"] now holds the 24450 security_ids twice: the
+    # original (closed by Roll 1) and the reopened one (from Roll 2).
+    all_24450_entries = [leg for leg in run.legs_planned["legs"] if leg["security_id"] in (_ce_id(24450), _pe_id(24450))]
+    assert len(all_24450_entries) == 4  # 2 security_ids x 2 history entries each
+    assert run.legs_planned["leg_state"][_ce_id(24450)]["status"] == "open"  # the reopened one is the current truth
+
+    # Whole-run close (daily SL/target/end-time) must reverse the reopened
+    # 24450 pair exactly once each -- not the stale, already-closed entry too.
+    dhan.quote_data.return_value = {
+        "status": "success",
+        "data": {"status": "success", "data": {"NSE_FNO": {
+            _ce_id(24450): {"last_price": 50.0}, _pe_id(24450): {"last_price": 20.0},
+            _ce_id(24400): {"last_price": 55.0}, _pe_id(24400): {"last_price": 50.0},
+            _ce_id(24350): {"last_price": 55.0}, _pe_id(24350): {"last_price": 50.0},
+        }}},
+    }
+    _close_open_run(db_session, dhan, run.user_strategy.user_id, run, is_live=False, reason="Daily target hit.")
+
+    db_session.refresh(run)
+    assert run.status == "closed"
+
+    orders = db_session.query(Order).filter(Order.strategy_run_id == run.id).all()
+    # 4 from Roll 1 (2 exit + 2 entry) + 4 from Roll 2 (2 exit + 2 entry) +
+    # 6 from the final close (FIN1's reopened 24450 pair + FIN2's 24400 +
+    # FIN3's 24350) = 14. The reopened 24450 pair must be reversed exactly
+    # once each by the final close, not twice.
+    final_close_24450_exits = [
+        o for o in orders
+        if o.security_id in (_ce_id(24450), _pe_id(24450)) and o.transaction_type == "BUY" and o.price in (50.0, 20.0)
+    ]
+    assert len(final_close_24450_exits) == 2  # one CE, one PE -- not four
+    assert len(orders) == 14

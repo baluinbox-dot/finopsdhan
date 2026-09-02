@@ -38,7 +38,7 @@ from app.dhan.client import DhanNotConnectedError, get_user_dhan_client
 from app.dhan.helpers import fetch_quotes, preview_order
 from app.email import send_email
 from app.models import Order, OrderStatus, StrategyMode, StrategyRun, User, UserStrategy
-from app.strategies.base import OrderLeg, StrategyContext, leg_pnl
+from app.strategies.base import OrderLeg, StrategyContext, currently_open_legs, leg_pnl
 from app.strategies.registry import get_strategy_class
 
 logger = logging.getLogger("app.engine")
@@ -211,9 +211,7 @@ def _close_open_run(
     "Close Now" button) must check this rather than assume success."""
     notes = open_run.legs_planned or {}
     leg_state = notes.get("leg_state") or {}
-    legs_data = [
-        leg for leg in notes.get("legs", []) if _open_leg_state(str(leg["security_id"]), leg_state)["status"] == "open"
-    ]
+    legs_data = currently_open_legs(notes.get("legs", []), leg_state)
 
     # Price exits off fresh quotes, not the stale entry price — reusing the
     # entry price would make paper P&L meaningless and, in live mode, would
@@ -331,10 +329,13 @@ def _apply_rolls(
 
     for roll in decision.get("rolls") or []:
         close_ids = {str(sid) for sid in (roll.get("close_security_ids") or [])}
-        to_close = [
-            leg for leg in legs_data
-            if str(leg["security_id"]) in close_ids and _open_leg_state(str(leg["security_id"]), leg_state)["status"] == "open"
-        ]
+        # currently_open_legs dedupes each security_id to its one genuinely-
+        # open history entry first — without that, a security_id that was
+        # closed earlier this run and later reopened by a roll revisiting
+        # the same strike would still have a *second*, stale entry in
+        # legs_data that also matches close_ids here, producing a
+        # duplicate real reversing order for one physical leg.
+        to_close = [leg for leg in currently_open_legs(legs_data, leg_state) if str(leg["security_id"]) in close_ids]
         new_legs = roll.get("new_legs") or []
         # A roll normally requires something real currently open to reverse
         # (see test_apply_rolls_ignores_a_roll_with_nothing_currently_open_
@@ -443,10 +444,10 @@ def _apply_leg_exits(
     leg_state: dict[str, Any] = {sid: dict(state) for sid, state in (notes.get("leg_state") or {}).items()}
 
     close_ids = {str(sid) for sid in (decision.get("close_security_ids") or [])}
-    to_close = [
-        leg for leg in legs_data
-        if str(leg["security_id"]) in close_ids and _open_leg_state(str(leg["security_id"]), leg_state)["status"] == "open"
-    ]
+    # See _apply_rolls's identical comment: dedupe to each security_id's
+    # one genuinely-open entry before matching close_ids, so a strike
+    # revisited after an earlier close in this run never gets closed twice.
+    to_close = [leg for leg in currently_open_legs(legs_data, leg_state) if str(leg["security_id"]) in close_ids]
 
     pnl_delta = 0.0
     if to_close:

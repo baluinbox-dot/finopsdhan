@@ -157,6 +157,32 @@ def test_compute_combined_margin_excludes_legs_already_closed_by_a_roll():
     assert [s["securityId"] for s in payload["scripList"]] == ["2"]  # only the still-open leg
 
 
+def test_compute_combined_margin_does_not_double_send_a_revisited_security_id():
+    """Regression for the bug found live 2026-09-02 on 4 real (paper-mode)
+    positions -- a strike closed by an earlier roll and later reopened
+    shares one security_id across two legs_planned["legs"] history
+    entries; before the currently_open_legs dedup fix, both entries were
+    sent to /margincalculator/multi, effectively double-billing that one
+    physical leg's margin requirement. See tests/test_engine_rolls.py's
+    engine-level regression test for the full writeup."""
+    legs = [
+        {"security_id": "1", "exchange_segment": "NSE_FNO", "transaction_type": "SELL", "quantity": 65, "product_type": "MARGIN", "price": 100.0},  # stale, closed
+        {"security_id": "1", "exchange_segment": "NSE_FNO", "transaction_type": "SELL", "quantity": 65, "product_type": "MARGIN", "price": 90.0},  # reopened
+    ]
+    us = _make_open_position(legs)
+    us.runs[0].legs_planned["leg_state"] = {"1": {"status": "open"}}  # the reopened occurrence's true state
+
+    dhan = _client()
+    dhan.dhan_http.post.return_value = {"status": "success", "data": {"totalMargin": 500.0}}
+
+    results = compute_combined_margin(dhan, [us])
+
+    assert len(results) == 1
+    payload = dhan.dhan_http.post.call_args[0][1]
+    assert len(payload["scripList"]) == 1  # not 2 -- the stale entry must not be sent a second time
+    assert payload["scripList"][0]["price"] == 90.0  # the reopened entry's own price, not the stale one's
+
+
 def test_compute_combined_margin_none_when_call_fails():
     legs = [{"security_id": "1", "exchange_segment": "NSE_FNO", "transaction_type": "SELL", "quantity": 65, "product_type": "MARGIN", "price": 100.0}]
     us = _make_open_position(legs)

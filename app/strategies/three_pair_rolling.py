@@ -54,7 +54,7 @@ from app.dhan.helpers import (
     find_strike_by_nearest_premium,
     get_lot_size,
 )
-from app.strategies.base import OrderLeg, Strategy, StrategyContext, leg_pnl, resolve_order_type
+from app.strategies.base import OrderLeg, Strategy, StrategyContext, currently_open_legs, leg_pnl, resolve_order_type
 
 IST = ZoneInfo("Asia/Kolkata")
 
@@ -84,10 +84,6 @@ def _strike_of(leg: dict) -> float | None:
         return float(tokens[1])
     except ValueError:
         return None
-
-
-def _leg_state(sid: str, leg_state: dict) -> dict:
-    return {"status": "open", **(leg_state.get(sid) or {})}
 
 
 def _nearest_strike(strikes: list[float], target: float) -> float:
@@ -249,7 +245,7 @@ class ThreePairRollingStrategy(Strategy):
             return True
 
         leg_state = open_run_notes.get("leg_state") or {}
-        open_legs = [leg for leg in legs if _leg_state(str(leg["security_id"]), leg_state)["status"] == "open"]
+        open_legs = currently_open_legs(legs, leg_state)
         if not open_legs:
             return False
 
@@ -304,11 +300,13 @@ class ThreePairRollingStrategy(Strategy):
         # be exactly 3 strikes (B, M, T ascending), each with a CE+PE pair.
         # Hedge legs are deliberately excluded: they're bought once at
         # entry and never roll with the window (see module docstring).
+        # currently_open_legs dedupes each security_id to its one genuinely
+        # -open history entry first — this strategy's whole premise is
+        # spot oscillating back and forth, so a strike it already closed
+        # earlier today is routinely revisited later the same run.
         groups: dict[float, list[dict]] = {}
-        for leg in legs:
+        for leg in currently_open_legs(legs, leg_state):
             if leg.get("role") != "primary":
-                continue
-            if _leg_state(str(leg["security_id"]), leg_state)["status"] != "open":
                 continue
             strike = _strike_of(leg)
             if strike is None:

@@ -69,6 +69,65 @@ def leg_pnl(leg_data: dict[str, Any], reference_price: float) -> float:
     return (reference_price - entry_price) * quantity
 
 
+def _leg_identity(leg: dict[str, Any]) -> tuple[str, str]:
+    """(security_id, role) — not security_id alone, because a hedge leg and
+    an independently-managed primary leg can legitimately land on the exact
+    same underlying option contract (same security_id) while being two
+    completely unrelated legs — e.g. a 3-Pair Rolling T/M/B window pair
+    picked separately from its combined hedge. Same reasoning, same key,
+    as `app.routers.dashboard._pair_orders`'s order-history grouping."""
+    return str(leg["security_id"]), str(leg.get("role") or "primary")
+
+
+def dedupe_legs_by_security_id(all_legs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """A run's full `legs` history (`StrategyRun.legs_planned["legs"]`),
+    collapsed to one entry per distinct (security_id, role) — the *last*
+    (most-recently-appended) occurrence of each. A hedge and a primary leg
+    sharing one security_id are different identities (different role) and
+    both survive; two entries for the very same identity do not.
+
+    `legs` is strictly append-only: a roll or per-leg exit never removes
+    or replaces an old entry, only marks it closed in `leg_state` and
+    appends the replacement (see `app.engine.runner`'s `_apply_rolls` /
+    `_apply_leg_exits`). Several rolling strategies can legitimately
+    revisit a strike they already closed earlier the same run — spot
+    oscillating back across a boundary it already crossed (Iron Condor
+    Rolling, Iron Fly with Adjustments, 3-Pair Rolling all do this). That
+    strike's security_id then gets a *second* entry in `legs` (same role
+    as the first) — and because `leg_state` only ever tracks each
+    security_id's *latest* status (a later roll's `leg_state[sid] =
+    {"status": "open"}` necessarily overwrites whatever closed status an
+    earlier occurrence of that same sid had), any per-sid flag read off
+    the raw, undeduped list — open/closed status, `in_window`, or
+    anything else a strategy tracks per leg — would incorrectly apply to
+    BOTH the stale, already-closed dict and the fresh, genuinely-open
+    one. That double-counts one physical leg everywhere it's read:
+    inflated Margin Used / Live P&L / Max Profit-Loss on the Dashboard,
+    and — more seriously — a *duplicate real reversing order* placed for
+    it the next time the run closes or rolls again (`_close_open_run` /
+    `_apply_rolls` in `app.engine.runner`).
+
+    Since `legs` is append-only, only the *last* occurrence of a given
+    identity can ever be the currently-live one — every earlier
+    occurrence of that same identity is unconditionally historical. Call
+    this *before* applying any leg_state-derived filter; for the
+    overwhelming majority of runs, where no security_id repeats within a
+    role, it's a no-op (every leg passes through unchanged)."""
+    last_by_identity: dict[tuple[str, str], dict[str, Any]] = {}
+    for leg in all_legs:
+        last_by_identity[_leg_identity(leg)] = leg  # later occurrences overwrite earlier ones
+    return list(last_by_identity.values())
+
+
+def currently_open_legs(all_legs: list[dict[str, Any]], leg_state: dict[str, Any]) -> list[dict[str, Any]]:
+    """`dedupe_legs_by_security_id` followed by the common case: only the
+    legs whose (now unambiguous, per-identity) status isn't "closed"."""
+    return [
+        leg for leg in dedupe_legs_by_security_id(all_legs)
+        if (leg_state.get(str(leg["security_id"])) or {}).get("status") != "closed"
+    ]
+
+
 def leg_strike(leg_data: dict[str, Any]) -> float | None:
     """Strike parsed from the trading_symbol every strategy in this app
     builds itself (`"{underlying} {strike} {CE|PE} {expiry}"`) — safe only
