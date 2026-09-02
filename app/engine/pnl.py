@@ -14,7 +14,7 @@ from typing import Any
 from app.dhan.helpers import fetch_combined_margin, fetch_quotes
 from app.engine.runner import find_open_run
 from app.models import UserStrategy
-from app.strategies.base import leg_pnl
+from app.strategies.base import leg_option_type, leg_pnl, leg_strike
 
 
 def compute_live_pnl(dhan_client: Any, user_strategies: list[UserStrategy]) -> list[dict]:
@@ -133,5 +133,125 @@ def compute_combined_margin(dhan_client: Any, user_strategies: list[UserStrategy
 
         margin_total = fetch_combined_margin(dhan_client, open_legs)
         results.append({"user_strategy_id": str(us.id), "margin_total": margin_total})
+
+    return results
+
+
+def _expiry_payoff_at(open_legs: list[dict], spot: float) -> float | None:
+    """Total intrinsic-value P&L, in rupees, across `open_legs` if the
+    underlying settled at `spot` at expiry — the entry premium already
+    collected/paid on each leg, plus/minus what that leg would be worth at
+    that spot. None if any leg's strike/option type can't be parsed (don't
+    guess)."""
+    total = 0.0
+    for leg in open_legs:
+        strike = leg_strike(leg)
+        option_type = leg_option_type(leg)
+        if strike is None or option_type is None:
+            return None
+        intrinsic = max(spot - strike, 0.0) if option_type == "CE" else max(strike - spot, 0.0)
+        price = float(leg["price"])
+        quantity = leg["quantity"]
+        if leg["transaction_type"] == "SELL":
+            total += (price - intrinsic) * quantity
+        else:
+            total += (intrinsic - price) * quantity
+    return total
+
+
+def _expiry_payoff_slope(open_legs: list[dict], *, direction: str) -> float:
+    """Constant slope (d P&L / d spot) of the piecewise-linear expiry
+    payoff in the unbounded region beyond every leg's strike — `"right"`
+    for spot above the highest strike, `"left"` for spot below the lowest.
+    A non-zero slope there means P&L runs away to +/-infinity in that
+    direction (an uncapped side, e.g. a naked sold option); the breakpoint
+    evaluations in `strategy_payoff_extremes` only find the true max/min
+    when both slopes are accounted for."""
+    slope = 0.0
+    for leg in open_legs:
+        option_type = leg_option_type(leg)
+        if option_type is None:
+            continue
+        quantity = leg["quantity"]
+        sign = 1 if leg["transaction_type"] == "BUY" else -1
+        # CE intrinsic's slope wrt spot is 1 on the right (spot > strike),
+        # 0 on the left. PE intrinsic's slope is -1 on the left, 0 on the
+        # right. A leg's own P&L slope is sign * (that intrinsic slope).
+        if option_type == "CE" and direction == "right":
+            slope += sign * quantity
+        elif option_type == "PE" and direction == "left":
+            slope += sign * -quantity
+    return slope
+
+
+def strategy_payoff_extremes(open_legs: list[dict], realized_so_far: float = 0.0) -> dict[str, float | None]:
+    """Best-case and worst-case total P&L (in rupees) for `open_legs` held
+    to expiry, computed purely from strikes/premiums/quantities — no live
+    quote needed. `realized_so_far` (e.g. `StrategyRun.realized_pnl` from
+    an earlier roll/leg-exit this run) is added as a flat offset to both,
+    since that money is already locked in regardless of where spot ends up.
+
+    The combined payoff of any set of CE/PE legs is piecewise-linear in
+    spot, with a kink only at each leg's own strike — so its extremes over
+    every possible spot price are found by evaluating P&L at each distinct
+    strike, plus checking whether the two unbounded tails (spot -> 0 and
+    spot -> infinity) run away to +/-infinity (a non-zero slope there,
+    from an uncapped leg like a naked sold option). This one calculation
+    is intentionally strategy-agnostic — it works the same way for a
+    defined-risk Iron Condor/Fly (bounded both sides) as it does for a
+    naked Single-Leg Seller (unbounded on its sold side), without any
+    strategy-specific formula.
+
+    Returns `{"max_profit": float|None, "max_loss": float|None}` — both
+    signed (max_loss is normally <= 0), `None` meaning that side is
+    unbounded ("Unlimited"). `{"max_profit": None, "max_loss": None}` if
+    `open_legs` is empty or a leg's strike/option type can't be parsed."""
+    if not open_legs:
+        return {"max_profit": None, "max_loss": None}
+
+    leg_strikes = [leg_strike(leg) for leg in open_legs]
+    if any(s is None for s in leg_strikes):
+        return {"max_profit": None, "max_loss": None}  # a strike failed to parse — don't guess
+    strikes = sorted(set(leg_strikes))
+
+    breakpoint_values = [_expiry_payoff_at(open_legs, k) for k in strikes]
+    if any(v is None for v in breakpoint_values):
+        return {"max_profit": None, "max_loss": None}  # an option type failed to parse — don't guess
+
+    values = [v + realized_so_far for v in breakpoint_values]  # type: ignore[operator]
+    left_slope = _expiry_payoff_slope(open_legs, direction="left")
+    right_slope = _expiry_payoff_slope(open_legs, direction="right")
+
+    max_profit_unlimited = left_slope < 0 or right_slope > 0
+    max_loss_unlimited = left_slope > 0 or right_slope < 0
+
+    return {
+        "max_profit": None if max_profit_unlimited else max(values),
+        "max_loss": None if max_loss_unlimited else min(values),
+    }
+
+
+def compute_max_profit_loss(user_strategies: list[UserStrategy]) -> list[dict]:
+    """Max-profit/max-loss (held-to-expiry, at current strikes) for every
+    currently-open position — no Dhan client needed at all, so this is
+    cheap enough to compute synchronously on every Dashboard page load
+    rather than needing its own polled endpoint like live-pnl/margin do."""
+    results: list[dict] = []
+    for us in user_strategies:
+        run = find_open_run(us)
+        if run is None:
+            continue
+        legs_planned = run.legs_planned or {}
+        all_legs = legs_planned.get("legs") or []
+        if not all_legs:
+            continue
+
+        leg_state = legs_planned.get("leg_state") or {}
+        open_legs = [leg for leg in all_legs if (leg_state.get(str(leg["security_id"])) or {}).get("status") != "closed"]
+        if not open_legs:
+            continue
+
+        extremes = strategy_payoff_extremes(open_legs, realized_so_far=float(run.realized_pnl or 0))
+        results.append({"user_strategy_id": str(us.id), **extremes})
 
     return results

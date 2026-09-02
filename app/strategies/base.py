@@ -69,6 +69,29 @@ def leg_pnl(leg_data: dict[str, Any], reference_price: float) -> float:
     return (reference_price - entry_price) * quantity
 
 
+def leg_strike(leg_data: dict[str, Any]) -> float | None:
+    """Strike parsed from the trading_symbol every strategy in this app
+    builds itself (`"{underlying} {strike} {CE|PE} {expiry}"`) — safe only
+    because every UNDERLYINGS key is a single space-free token. Several
+    strategy modules keep their own private copy of this same parse (e.g.
+    iron_condor_rolling.py's `_strike_of`); this shared version exists for
+    code that isn't tied to one specific strategy, like the dashboard's
+    max-profit/max-loss calculator in app/engine/pnl.py."""
+    tokens = (leg_data.get("trading_symbol") or "").split()
+    if len(tokens) < 2:
+        return None
+    try:
+        return float(tokens[1])
+    except ValueError:
+        return None
+
+
+def leg_option_type(leg_data: dict[str, Any]) -> str | None:
+    """CE/PE parsed off the same trading_symbol convention as `leg_strike`."""
+    tokens = (leg_data.get("trading_symbol") or "").split()
+    return tokens[2] if len(tokens) >= 3 and tokens[2] in ("CE", "PE") else None
+
+
 @dataclass
 class StrategyContext:
     dhan_client: dhanhq

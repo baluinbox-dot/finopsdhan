@@ -13,7 +13,7 @@ from sqlalchemy import select
 from app.dhan.client import DhanNotConnectedError, get_user_dhan_client
 from app.dhan.helpers import UNDERLYINGS
 from app.deps import CurrentUser, DbSession
-from app.engine.pnl import compute_combined_margin, compute_live_pnl
+from app.engine.pnl import compute_combined_margin, compute_live_pnl, compute_max_profit_loss
 from app.engine.runner import find_open_run
 from app.models import Order, UserStrategy
 from app.templating import IST, flash, render, to_ist, url
@@ -147,6 +147,12 @@ def dashboard(
     if strategy_id and strategy_id not in {str(us.id) for us in visible_strategies}:
         strategy_id = ""  # no longer a valid choice under the current underlying filter
 
+    # Held-to-expiry max profit/max loss at the current strikes — pure
+    # arithmetic on already-loaded position data, no Dhan call needed, so
+    # this is cheap enough to compute synchronously on every page load
+    # rather than needing its own polled endpoint like live-pnl/margin do.
+    max_pnl_by_id = {row["user_strategy_id"]: row for row in compute_max_profit_loss(visible_strategies)}
+
     # Pairing needs every order (an entry can be arbitrarily far behind its
     # exit), so this loads the user's full order history rather than one
     # page at a time — fine at this app's per-tenant order volume; revisit
@@ -217,6 +223,7 @@ def dashboard(
             "underlying": underlying,
             "active_count": active_count,
             "open_run_ids": open_run_ids,
+            "max_pnl_by_id": max_pnl_by_id,
             "running_rows": running_rows,
             "closed_rows": closed_rows,
             "paper_count": paper_count,
