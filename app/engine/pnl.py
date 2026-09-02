@@ -14,7 +14,7 @@ from typing import Any
 from app.dhan.helpers import fetch_combined_margin, fetch_quotes
 from app.engine.runner import find_open_run
 from app.models import UserStrategy
-from app.strategies.base import leg_option_type, leg_pnl, leg_strike
+from app.strategies.base import currently_open_legs, leg_option_type, leg_pnl, leg_strike
 
 
 def compute_live_pnl(dhan_client: Any, user_strategies: list[UserStrategy]) -> list[dict]:
@@ -46,7 +46,7 @@ def compute_live_pnl(dhan_client: Any, user_strategies: list[UserStrategy]) -> l
             continue
 
         leg_state = legs_planned.get("leg_state") or {}
-        open_legs = [leg for leg in all_legs if (leg_state.get(str(leg["security_id"])) or {}).get("status") != "closed"]
+        open_legs = currently_open_legs(all_legs, leg_state)
         if not open_legs:
             continue  # every leg already closed via roll/per-leg exit; whole-position close will finish it off
 
@@ -127,7 +127,7 @@ def compute_combined_margin(dhan_client: Any, user_strategies: list[UserStrategy
             continue
 
         leg_state = legs_planned.get("leg_state") or {}
-        open_legs = [leg for leg in all_legs if (leg_state.get(str(leg["security_id"])) or {}).get("status") != "closed"]
+        open_legs = currently_open_legs(all_legs, leg_state)
         if not open_legs:
             continue  # every leg already closed via roll/per-leg exit; whole-position close will finish it off
 
@@ -247,7 +247,7 @@ def compute_max_profit_loss(user_strategies: list[UserStrategy]) -> list[dict]:
             continue
 
         leg_state = legs_planned.get("leg_state") or {}
-        open_legs = [leg for leg in all_legs if (leg_state.get(str(leg["security_id"])) or {}).get("status") != "closed"]
+        open_legs = currently_open_legs(all_legs, leg_state)
         if not open_legs:
             continue
 

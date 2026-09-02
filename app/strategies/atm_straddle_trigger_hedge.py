@@ -30,7 +30,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from app.dhan.helpers import UNDERLYINGS, fetch_chain_df, fetch_quotes, find_strike_by_nearest_premium, get_lot_size
-from app.strategies.base import OrderLeg, Strategy, StrategyContext, resolve_order_type
+from app.strategies.base import OrderLeg, Strategy, StrategyContext, currently_open_legs, resolve_order_type
 
 IST = ZoneInfo("Asia/Kolkata")
 
@@ -221,7 +221,7 @@ class ATMStraddleTriggerHedge(Strategy):
 
         leg_state = open_run_notes.get("leg_state") or {}
         primary_legs = [leg for leg in legs if leg.get("role") == "primary"]
-        open_primary = [leg for leg in primary_legs if _leg_state(str(leg["security_id"]), leg_state)["status"] == "open"]
+        open_primary = currently_open_legs(primary_legs, leg_state)
         if not open_primary:
             # Nothing left on the sell side (both legs already closed via
             # per-leg SL) — safety net in case a hedge was somehow left
@@ -257,7 +257,7 @@ class ATMStraddleTriggerHedge(Strategy):
         leg_state = open_run_notes.get("leg_state") or {}
         leg_by_sid = {str(leg["security_id"]): leg for leg in legs}
         primary_legs = [leg for leg in legs if leg.get("role") == "primary"]
-        open_primary = [leg for leg in primary_legs if _leg_state(str(leg["security_id"]), leg_state)["status"] == "open"]
+        open_primary = currently_open_legs(primary_legs, leg_state)
         if not open_primary:
             return None
 

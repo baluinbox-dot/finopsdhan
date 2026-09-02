@@ -59,7 +59,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from app.dhan.helpers import UNDERLYINGS, fetch_chain_df, fetch_quotes, fetch_spot_price, get_lot_size
-from app.strategies.base import OrderLeg, Strategy, StrategyContext, leg_pnl, resolve_order_type
+from app.strategies.base import OrderLeg, Strategy, StrategyContext, currently_open_legs, leg_pnl, resolve_order_type
 
 IST = ZoneInfo("Asia/Kolkata")
 
@@ -88,10 +88,6 @@ def _strike_of(leg: dict) -> float | None:
         return float(tokens[1])
     except ValueError:
         return None
-
-
-def _leg_state(sid: str, leg_state: dict) -> dict:
-    return {"status": "open", **(leg_state.get(sid) or {})}
 
 
 class IronFlyAdjustmentsStrategy(Strategy):
@@ -255,7 +251,7 @@ class IronFlyAdjustmentsStrategy(Strategy):
                     return True  # expiry day itself, past the close time
 
         leg_state = open_run_notes.get("leg_state") or {}
-        open_legs = [leg for leg in legs if _leg_state(str(leg["security_id"]), leg_state)["status"] == "open"]
+        open_legs = currently_open_legs(legs, leg_state)
         if not open_legs:
             return False
 
@@ -321,13 +317,10 @@ class IronFlyAdjustmentsStrategy(Strategy):
             return None
 
         leg_state = open_run_notes.get("leg_state") or {}
+        open_now = currently_open_legs(legs, leg_state)
 
         def _open_side_legs(pair_id: str, txn: str) -> list[dict]:
-            return [
-                leg for leg in legs
-                if leg.get("pair_id") == pair_id and leg.get("transaction_type") == txn
-                and _leg_state(str(leg["security_id"]), leg_state)["status"] == "open"
-            ]
+            return [leg for leg in open_now if leg.get("pair_id") == pair_id and leg.get("transaction_type") == txn]
 
         ceb_legs = _open_side_legs("CE", "BUY")
         peb_legs = _open_side_legs("PE", "BUY")

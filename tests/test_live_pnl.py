@@ -176,6 +176,32 @@ def test_pnl_excludes_legs_already_closed_by_a_roll_and_adds_realized_pnl():
     assert r["pnl_total"] == -2500.0 + unrealized
 
 
+def test_pnl_does_not_double_count_a_security_id_revisited_after_an_earlier_close():
+    """Regression for the bug found live 2026-09-02 (see
+    tests/test_engine_rolls.py's engine-level version for the full
+    writeup): a strike closed by an earlier roll and later reopened by a
+    subsequent roll shares one security_id across two history entries.
+    leg_state only tracks that sid's latest status, so before the
+    currently_open_legs dedup fix, both entries priced into pnl_total,
+    doubling this leg's contribution."""
+    legs = [
+        {"security_id": "91", "exchange_segment": "NSE_FNO", "transaction_type": "SELL", "quantity": 65, "price": 100.0},  # stale, closed
+        {"security_id": "91", "exchange_segment": "NSE_FNO", "transaction_type": "SELL", "quantity": 65, "price": 90.0},  # reopened, genuinely open
+    ]
+    us = _make_open_position(legs, entry_premium=90.0, leg_state={"91": {"status": "open"}})
+
+    dhan = MagicMock()
+    dhan.quote_data.return_value = {"status": "success", "data": {"status": "success", "data": {"NSE_FNO": {"91": {"last_price": 60.0}}}}}
+
+    results = compute_live_pnl(dhan, [us])
+
+    assert len(results) == 1
+    r = results[0]
+    # Only the reopened (90.0 entry) occurrence is priced -- once, not twice.
+    assert r["legs"] == [{"security_id": "91", "current_price": 60.0}]
+    assert r["pnl_total"] == (90.0 - 60.0) * 65  # not doubled
+
+
 def test_pnl_returns_nothing_once_every_leg_has_closed_via_rolls():
     """A run can still be technically 'open' for a moment after its last
     leg closes (whole-position close hasn't run yet) — must not error or

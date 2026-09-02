@@ -171,6 +171,28 @@ def test_compute_excludes_legs_already_closed_and_includes_realized_pnl():
     assert r["max_profit"] == 77.20 * 75 - 2500.0
 
 
+def test_compute_does_not_double_count_a_revisited_security_id():
+    """Regression for the bug found live 2026-09-02 -- a strike closed by
+    an earlier roll and later reopened shares one security_id across two
+    legs_planned["legs"] history entries; before the currently_open_legs
+    dedup fix, both entries priced into the payoff curve, doubling this
+    leg's contribution to Max Profit/Max Loss. See
+    tests/test_engine_rolls.py's engine-level regression test."""
+    legs = [
+        _leg(24000, "PE", "SELL", 100.0, security_id="1"),  # stale, closed
+        _leg(24000, "PE", "SELL", 90.0, security_id="1"),  # reopened, genuinely open
+    ]
+    us = _make_open_position(legs, leg_state={"1": {"status": "open"}})
+
+    results = compute_max_profit_loss([us])
+
+    assert len(results) == 1
+    # Naked PE sell -- capped profit at the (single, reopened) premium
+    # collected, not double it.
+    assert results[0]["max_profit"] == 90.0 * 75
+    assert results[0]["max_loss"] is None
+
+
 def test_compute_returns_nothing_once_every_leg_has_closed():
     legs = [_leg(24150, "PE", "SELL", 131.60, security_id="24150")]
     us = _make_open_position(legs, leg_state={"24150": {"status": "closed"}})
