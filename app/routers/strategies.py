@@ -1620,6 +1620,218 @@ def configure_iron_fly_submit(
     return RedirectResponse(url("/strategies"), status_code=303)
 
 
+@router.get("/{strategy_id}/configure-dynamic-strangle")
+def configure_dynamic_strangle_form(
+    request: Request,
+    db: DbSession,
+    current_user: CurrentUser,
+    strategy_id: uuid.UUID,
+    user_strategy_id: str = "",
+    underlying: str = "",
+    expiry: str = "",
+    expiry_type: str = "",
+):
+    strategy = db.get(Strategy, strategy_id)
+    if strategy is None or not strategy.is_published:
+        flash(request, "Strategy not found.", "error")
+        return RedirectResponse(url("/strategies"), status_code=303)
+
+    existing: UserStrategy | None = None
+    if user_strategy_id:
+        try:
+            existing = db.get(UserStrategy, uuid.UUID(user_strategy_id))
+        except ValueError:
+            existing = None
+        if existing is None or existing.user_id != current_user.id or existing.strategy_id != strategy_id:
+            flash(request, "Strategy instance not found.", "error")
+            return RedirectResponse(url("/strategies"), status_code=303)
+
+    existing_params = existing.params if existing else {}
+    underlying = (underlying or existing_params.get("underlying") or "NIFTY").upper()
+    if underlying not in UNDERLYINGS:
+        underlying = "NIFTY"
+    expiry_type = (expiry_type or existing_params.get("expiry_type") or "weekly").lower()
+    if expiry_type not in ("weekly", "monthly"):
+        expiry_type = "weekly"
+    if not expiry:
+        expiry = existing_params.get("expiry") or ""
+
+    has_dhan = current_user.dhan_credential is not None and current_user.dhan_credential.is_active
+
+    try:
+        strategy_cls = get_strategy_class(strategy.code_ref)
+        class_defaults = strategy_cls.default_params
+    except ValueError:
+        class_defaults = {}
+    params = {**class_defaults, **strategy.default_params, **existing_params}
+    params["underlying"] = underlying
+    params["expiry_type"] = expiry_type
+
+    all_expiries: list[str] = []
+    expiries: list[str] = []
+    expiry_error: str | None = None
+    strangle_preview: dict | None = None
+    selected_expiry = expiry
+
+    if has_dhan:
+        try:
+            user_dhan = get_user_dhan_client(db, current_user)
+            all_expiries = list_expiries(user_dhan.client, underlying)
+        except DhanNotConnectedError as exc:
+            expiry_error = str(exc)
+        except Exception as exc:  # noqa: BLE001
+            expiry_error = f"Could not fetch expiries from Dhan: {exc}"
+
+        expiry_labels = _classify_expiries(all_expiries)
+        expiries = [e for e in all_expiries if expiry_labels.get(e) == expiry_type]
+
+        if selected_expiry not in expiries:
+            selected_expiry = expiries[0] if expiries else ""
+
+        if selected_expiry and selected_expiry in expiries:
+            try:
+                meta = UNDERLYINGS[underlying]
+                chain_df, spot = fetch_chain_df(
+                    user_dhan.client,
+                    under_security_id=meta["security_id"],
+                    expiry=selected_expiry,
+                    under_exchange_segment=meta["exchange_segment"],
+                )
+                if not chain_df.empty:
+                    strikes = sorted(chain_df["strike"].tolist())
+                    base_distance = float(params.get("base_distance_points") or 2000)
+                    adjustment_distance = base_distance / 2
+                    fresh_distance = base_distance / 4
+                    ce = min(strikes, key=lambda x: abs(x - (spot + base_distance)))
+                    pe = min(strikes, key=lambda x: abs(x - (spot - base_distance)))
+                    strangle_preview = {
+                        "spot": spot,
+                        "ce": ce,
+                        "pe": pe,
+                        "adjustment_distance": adjustment_distance,
+                        "fresh_distance": fresh_distance,
+                    }
+            except Exception as exc:  # noqa: BLE001 — preview is a nice-to-have, never block the form
+                expiry_error = expiry_error or f"Could not fetch live strikes: {exc}"
+
+    return render(
+        request,
+        "strategies/configure_dynamic_strangle.html",
+        {
+            "current_user": current_user,
+            "user_strategy_id": user_strategy_id,
+            "strategy": strategy,
+            "has_dhan": has_dhan,
+            "underlyings": UNDERLYINGS,
+            "selected_underlying": underlying,
+            "selected_expiry_type": expiry_type,
+            "selected_expiry": selected_expiry,
+            "expiries": expiries,
+            "expiry_error": expiry_error,
+            "strangle_preview": strangle_preview,
+            "params": params,
+            "existing": existing,
+        },
+    )
+
+
+@router.post("/{strategy_id}/configure-dynamic-strangle")
+def configure_dynamic_strangle_submit(
+    request: Request,
+    db: DbSession,
+    current_user: CurrentUser,
+    strategy_id: uuid.UUID,
+    user_strategy_id: str = Form(""),
+    label: str = Form(""),
+    underlying: str = Form(...),
+    expiry_type: str = Form("weekly"),
+    expiry: str = Form(...),
+    lots: int = Form(1),
+    start_time: str = Form("09:20"),
+    end_time: str = Form("14:45"),
+    base_distance_points: float = Form(2000),
+    daily_stop_loss: float = Form(10000),
+    daily_target: float = Form(15000),
+    order_type: str = Form("LIMIT"),
+    live_confirmed: bool = Form(False),
+    mode: str = Form("paper"),
+):
+    strategy = db.get(Strategy, strategy_id)
+    if strategy is None or not strategy.is_published:
+        flash(request, "Strategy not found.", "error")
+        return RedirectResponse(url("/strategies"), status_code=303)
+
+    if not current_user.dhan_credential or not current_user.dhan_credential.is_active:
+        flash(request, "Connect your Dhan account on the Settings page before enabling a strategy.", "error")
+        return RedirectResponse(url("/strategies"), status_code=303)
+
+    if underlying.upper() not in UNDERLYINGS:
+        flash(request, "Unknown underlying.", "error")
+        return RedirectResponse(url(f"/strategies/{strategy_id}/configure-dynamic-strangle"), status_code=303)
+
+    if not expiry:
+        flash(request, "Pick an expiry before saving.", "error")
+        redirect_url = f"/strategies/{strategy_id}/configure-dynamic-strangle?underlying={underlying}"
+        if user_strategy_id:
+            redirect_url += f"&user_strategy_id={user_strategy_id}"
+        return RedirectResponse(url(redirect_url), status_code=303)
+
+    if base_distance_points <= 0:
+        flash(request, "Base Distance must be greater than zero.", "error")
+        redirect_url = f"/strategies/{strategy_id}/configure-dynamic-strangle?underlying={underlying}&expiry={expiry}"
+        if user_strategy_id:
+            redirect_url += f"&user_strategy_id={user_strategy_id}"
+        return RedirectResponse(url(redirect_url), status_code=303)
+
+    requested_mode = _resolve_requested_mode(request, mode, live_confirmed)
+
+    params = {
+        "underlying": underlying.upper(),
+        "expiry_type": "monthly" if expiry_type == "monthly" else "weekly",
+        "expiry": expiry,
+        "lots": lots,
+        "start_time": start_time,
+        "end_time": end_time,
+        "base_distance_points": base_distance_points,
+        "daily_stop_loss": daily_stop_loss,
+        "daily_target": daily_target,
+        "order_type": "MARKET" if order_type == "MARKET" else "LIMIT",
+    }
+
+    existing: UserStrategy | None = None
+    if user_strategy_id:
+        try:
+            existing = db.get(UserStrategy, uuid.UUID(user_strategy_id))
+        except ValueError:
+            existing = None
+        if existing is None or existing.user_id != current_user.id or existing.strategy_id != strategy_id:
+            flash(request, "Strategy instance not found.", "error")
+            return RedirectResponse(url("/strategies"), status_code=303)
+
+    final_label = label.strip() or f"Dynamic Strangle {params['underlying']}"
+
+    if existing:
+        existing.label = final_label
+        existing.params = params
+        existing.mode = requested_mode
+        existing.is_active = True
+    else:
+        db.add(
+            UserStrategy(
+                user_id=current_user.id,
+                strategy_id=strategy_id,
+                label=final_label,
+                params=params,
+                mode=requested_mode,
+                is_active=True,
+            )
+        )
+    db.commit()
+
+    flash(request, f"{final_label} configured and enabled in {requested_mode.value} mode.", "success")
+    return RedirectResponse(url("/strategies"), status_code=303)
+
+
 # --- Superadmin: publish/manage strategy definitions ---
 
 

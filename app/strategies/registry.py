@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from app.strategies.atm_straddle_trigger_hedge import ATMStraddleTriggerHedge
 from app.strategies.base import Strategy
+from app.strategies.dynamic_strangle import DynamicStrangleStrategy
 from app.strategies.example_short_strangle import ExampleShortStrangle
 from app.strategies.iron_condor_rolling import IronCondorRollingStrategy
 from app.strategies.iron_fly_adjustments import IronFlyAdjustmentsStrategy
@@ -24,6 +25,7 @@ STRATEGY_REGISTRY: dict[str, type[Strategy]] = {
     "three_pair_rolling_leg_sl_target": ThreePairRollingLegSLTargetStrategy,
     "iron_condor_rolling": IronCondorRollingStrategy,
     "iron_fly_adjustments": IronFlyAdjustmentsStrategy,
+    "dynamic_strangle": DynamicStrangleStrategy,
 }
 
 # code_refs whose configuration is rich enough to need a dedicated
@@ -37,6 +39,7 @@ RICH_CONFIG_STRATEGIES: set[str] = {
     "three_pair_rolling_leg_sl_target",
     "iron_condor_rolling",
     "iron_fly_adjustments",
+    "dynamic_strangle",
 }
 
 
