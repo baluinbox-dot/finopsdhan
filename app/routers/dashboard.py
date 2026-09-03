@@ -133,17 +133,27 @@ def dashboard(
     active_count = sum(1 for us in all_user_strategies if us.is_active)
     open_run_ids = {us.id for us in all_user_strategies if find_open_run(us) is not None}
 
-    # "My Strategies" only ever lists instances that are either active, or
-    # inactive but still holding an open position — a disabled instance
+    # "My Strategies" only ever lists instances that are both active AND
+    # whose parent Strategy is still published, OR any instance still
+    # holding an open position regardless of either flag — disabling an
+    # instance (or a superadmin unpublishing its Strategy from the catalog)
     # never force-closes what it already had open, so dropping it from view
     # here would hide its Close Now button and live P&L, leaving a real
-    # position invisible. A fully idle, disabled instance (no open run) is
-    # what Balu asked to stop showing on the dashboard; it's still fully
-    # manageable (re-enable/delete) from the Strategies page. `us_by_id`
-    # deliberately stays keyed off *every* instance (not this filtered
-    # list), so a strategy hidden here today doesn't also wrongly drop its
-    # already-closed orders from today out of the Closed Orders table.
-    user_strategies = [us for us in all_user_strategies if us.is_active or us.id in open_run_ids]
+    # position invisible. A fully idle instance that's inactive or whose
+    # strategy got unpublished (no open run) is what Balu asked to stop
+    # showing on the dashboard; it's still fully manageable (re-enable/
+    # delete) from the Strategies page, and unpublishing is cosmetic only
+    # here — it does NOT touch is_active, so the scheduler keeps
+    # evaluating/trading an already-active instance of an unpublished
+    # strategy exactly as before (see app/engine/scheduler.py, which never
+    # looks at Strategy.is_published). `us_by_id` deliberately stays keyed
+    # off *every* instance (not this filtered list), so a strategy hidden
+    # here today doesn't also wrongly drop its already-closed orders from
+    # today out of the Closed Orders table.
+    user_strategies = [
+        us for us in all_user_strategies
+        if (us.is_active and us.strategy.is_published) or us.id in open_run_ids
+    ]
 
     # Underlying filter narrows *everything* below it — "My Strategies", the
     # Strategy dropdown's own option list (so it only ever offers instances
