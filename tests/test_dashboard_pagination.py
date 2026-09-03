@@ -437,6 +437,29 @@ def test_dashboard_hides_inactive_instance_with_no_open_position(client, db_sess
     assert "No strategies enabled yet" in resp.text
 
 
+def test_dashboard_hides_active_instance_whose_strategy_was_unpublished_with_no_open_position(client, db_session):
+    """Unpublishing a Strategy from the superadmin catalog (is_published =
+    False) doesn't touch any existing instance's is_active -- the
+    instance itself is untouched and the scheduler keeps trading it (see
+    the comment in app/routers/dashboard.py). This is cosmetic-only: an
+    otherwise-active instance of an unpublished strategy still gets
+    dropped from "My Strategies" once it has no open position."""
+    user = _register_and_login(client, db_session, "trader@example.com")
+    strategy = Strategy(name="Unpublished Strategy", code_ref="three_pair_rolling_leg_sl_target", is_published=False)
+    db_session.add(strategy)
+    db_session.flush()
+    db_session.add(UserStrategy(
+        user_id=user.id, strategy_id=strategy.id, mode=StrategyMode.PAPER, is_active=True,
+        label="NIFTY SL-TARGET",
+    ))
+    db_session.commit()
+
+    resp = client.get("/dashboard")
+    assert resp.status_code == 200
+    assert "NIFTY SL-TARGET" not in resp.text
+    assert "No strategies enabled yet" in resp.text
+
+
 def test_dashboard_shows_inactive_instance_that_still_has_an_open_position(client, db_session):
     """Disabling a strategy never force-closes what it already had open --
     it must stay visible (with a Close Now button) until that position is
@@ -457,6 +480,29 @@ def test_dashboard_shows_inactive_instance_that_still_has_an_open_position(clien
     resp = client.get("/dashboard")
     assert resp.status_code == 200
     assert "Disabled But Open" in resp.text
+    assert "Close Now" in resp.text
+
+
+def test_dashboard_shows_unpublished_strategy_instance_that_still_has_an_open_position(client, db_session):
+    """Same safety exception as the is_active case, for an unpublished
+    strategy: it must stay visible with Close Now until the position is
+    actually closed."""
+    user = _register_and_login(client, db_session, "trader@example.com")
+    strategy = Strategy(name="Unpublished Open Strategy", code_ref="three_pair_rolling_leg_sl_target", is_published=False)
+    db_session.add(strategy)
+    db_session.flush()
+    user_strategy = UserStrategy(
+        user_id=user.id, strategy_id=strategy.id, mode=StrategyMode.PAPER, is_active=True,
+        label="BANKNIFTY SL-TARGET",
+    )
+    db_session.add(user_strategy)
+    db_session.flush()
+    db_session.add(StrategyRun(user_strategy_id=user_strategy.id, status="open", legs_planned={}))
+    db_session.commit()
+
+    resp = client.get("/dashboard")
+    assert resp.status_code == 200
+    assert "BANKNIFTY SL-TARGET" in resp.text
     assert "Close Now" in resp.text
 
 
