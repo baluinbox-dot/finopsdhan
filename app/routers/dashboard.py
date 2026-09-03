@@ -127,11 +127,23 @@ def dashboard(
     if underlying and underlying not in UNDERLYINGS:
         underlying = ""  # unrecognized value (tampered/stale link) -> "All Underlyings"
 
-    user_strategies = db.scalars(
+    all_user_strategies = db.scalars(
         select(UserStrategy).where(UserStrategy.user_id == current_user.id)
     ).all()
-    active_count = sum(1 for us in user_strategies if us.is_active)
-    open_run_ids = {us.id for us in user_strategies if find_open_run(us) is not None}
+    active_count = sum(1 for us in all_user_strategies if us.is_active)
+    open_run_ids = {us.id for us in all_user_strategies if find_open_run(us) is not None}
+
+    # "My Strategies" only ever lists instances that are either active, or
+    # inactive but still holding an open position — a disabled instance
+    # never force-closes what it already had open, so dropping it from view
+    # here would hide its Close Now button and live P&L, leaving a real
+    # position invisible. A fully idle, disabled instance (no open run) is
+    # what Balu asked to stop showing on the dashboard; it's still fully
+    # manageable (re-enable/delete) from the Strategies page. `us_by_id`
+    # deliberately stays keyed off *every* instance (not this filtered
+    # list), so a strategy hidden here today doesn't also wrongly drop its
+    # already-closed orders from today out of the Closed Orders table.
+    user_strategies = [us for us in all_user_strategies if us.is_active or us.id in open_run_ids]
 
     # Underlying filter narrows *everything* below it — "My Strategies", the
     # Strategy dropdown's own option list (so it only ever offers instances
@@ -165,7 +177,7 @@ def dashboard(
     # cards always show everything regardless). An order with no
     # strategy_run (shouldn't normally happen, but Order.strategy_run_id is
     # nullable) never matches a specific filter — only "All".
-    us_by_id = {us.id: us for us in user_strategies}
+    us_by_id = {us.id: us for us in all_user_strategies}
     filtered_orders = all_orders
     if strategy_id:
         filtered_orders = [

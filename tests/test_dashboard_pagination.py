@@ -271,7 +271,7 @@ def test_dashboard_strategy_filter_narrows_running_and_closed(client, db_session
     other_strategy = Strategy(name="Other Strategy", code_ref="x", is_published=True)
     db_session.add(other_strategy)
     db_session.flush()
-    other_user_strategy = UserStrategy(user_id=user.id, strategy_id=other_strategy.id, mode=StrategyMode.PAPER)
+    other_user_strategy = UserStrategy(user_id=user.id, strategy_id=other_strategy.id, mode=StrategyMode.PAPER, is_active=True)
     db_session.add(other_user_strategy)
     db_session.flush()
 
@@ -398,11 +398,11 @@ def test_dashboard_underlying_filter_narrows_my_strategies_table(client, db_sess
     db_session.add(strategy)
     db_session.flush()
     db_session.add(UserStrategy(
-        user_id=user.id, strategy_id=strategy.id, mode=StrategyMode.PAPER,
+        user_id=user.id, strategy_id=strategy.id, mode=StrategyMode.PAPER, is_active=True,
         label="NIFTY Rolling", params={"underlying": "NIFTY"},
     ))
     db_session.add(UserStrategy(
-        user_id=user.id, strategy_id=strategy.id, mode=StrategyMode.PAPER,
+        user_id=user.id, strategy_id=strategy.id, mode=StrategyMode.PAPER, is_active=True,
         label="BANKNIFTY Rolling", params={"underlying": "BANKNIFTY"},
     ))
     db_session.commit()
@@ -415,6 +415,49 @@ def test_dashboard_underlying_filter_narrows_my_strategies_table(client, db_sess
     resp_all = client.get("/dashboard")
     assert "NIFTY Rolling" in resp_all.text
     assert "BANKNIFTY Rolling" in resp_all.text
+
+
+def test_dashboard_hides_inactive_instance_with_no_open_position(client, db_session):
+    """A disabled instance with nothing open is clutter, not a position to
+    watch -- it's dropped from "My Strategies" entirely (manage it from the
+    Strategies page instead)."""
+    user = _register_and_login(client, db_session, "trader@example.com")
+    strategy = Strategy(name="Idle Strategy", code_ref="x", is_published=True)
+    db_session.add(strategy)
+    db_session.flush()
+    db_session.add(UserStrategy(
+        user_id=user.id, strategy_id=strategy.id, mode=StrategyMode.PAPER, is_active=False,
+        label="Disabled Instance",
+    ))
+    db_session.commit()
+
+    resp = client.get("/dashboard")
+    assert resp.status_code == 200
+    assert "Disabled Instance" not in resp.text
+    assert "No strategies enabled yet" in resp.text
+
+
+def test_dashboard_shows_inactive_instance_that_still_has_an_open_position(client, db_session):
+    """Disabling a strategy never force-closes what it already had open --
+    it must stay visible (with a Close Now button) until that position is
+    actually closed, even though it's now Inactive."""
+    user = _register_and_login(client, db_session, "trader@example.com")
+    strategy = Strategy(name="Stuck Open Strategy", code_ref="x", is_published=True)
+    db_session.add(strategy)
+    db_session.flush()
+    user_strategy = UserStrategy(
+        user_id=user.id, strategy_id=strategy.id, mode=StrategyMode.PAPER, is_active=False,
+        label="Disabled But Open",
+    )
+    db_session.add(user_strategy)
+    db_session.flush()
+    db_session.add(StrategyRun(user_strategy_id=user_strategy.id, status="open", legs_planned={}))
+    db_session.commit()
+
+    resp = client.get("/dashboard")
+    assert resp.status_code == 200
+    assert "Disabled But Open" in resp.text
+    assert "Close Now" in resp.text
 
 
 def test_dashboard_underlying_filter_narrows_running_and_closed_orders(client, db_session):
@@ -494,7 +537,7 @@ def test_dashboard_unknown_underlying_value_falls_back_to_all(client, db_session
     db_session.add(strategy)
     db_session.flush()
     db_session.add(UserStrategy(
-        user_id=user.id, strategy_id=strategy.id, mode=StrategyMode.PAPER,
+        user_id=user.id, strategy_id=strategy.id, mode=StrategyMode.PAPER, is_active=True,
         label="NIFTY Instance", params={"underlying": "NIFTY"},
     ))
     db_session.commit()
