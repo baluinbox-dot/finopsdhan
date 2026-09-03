@@ -1,0 +1,179 @@
+{% extends "base.html" %}
+{% block title %}Configure {{ strategy.name }} — FinOps Algo{% endblock %}
+{% block content %}
+<h4 class="mb-1">{{ 'Reconfigure: ' ~ (existing.label or strategy.name) if existing else 'Add New Instance: ' ~ strategy.name }}</h4>
+<p class="text-body-secondary">{{ strategy.description }}</p>
+{% if not existing %}
+<p class="small text-body-secondary">
+    This creates a <strong>new, independent instance</strong> — any other instances of this strategy you already have
+    running keep running untouched.
+</p>
+{% endif %}
+
+{% if not has_dhan %}
+<div class="alert alert-warning">
+    Connect your Dhan account on the <a href="{{ url('/settings/dhan') }}">Settings page</a> before configuring this strategy —
+    the expiry and strike info below is fetched live from your own Dhan connection.
+</div>
+{% else %}
+
+<div class="card stat-card mb-3" style="max-width: 720px;">
+    <div class="card-body">
+        <form method="get" action="{{ url('/strategies/' ~ strategy.id ~ '/configure-dynamic-strangle') }}" class="row g-2 align-items-end">
+            <input type="hidden" name="user_strategy_id" value="{{ user_strategy_id }}">
+            <div class="col-auto">
+                <label class="form-label small mb-0">Underlying</label>
+                <select name="underlying" class="form-select form-select-sm" onchange="this.form.submit()">
+                    {% for key, meta in underlyings.items() %}
+                    <option value="{{ key }}" {{ 'selected' if key == selected_underlying else '' }}>{{ meta.label }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-auto">
+                <label class="form-label small mb-0">Expiry Type</label>
+                <select name="expiry_type" class="form-select form-select-sm" onchange="this.form.submit()">
+                    <option value="weekly" {{ 'selected' if selected_expiry_type == 'weekly' else '' }}>Weekly</option>
+                    <option value="monthly" {{ 'selected' if selected_expiry_type == 'monthly' else '' }}>Monthly</option>
+                </select>
+            </div>
+            <div class="col-auto">
+                <label class="form-label small mb-0">Expiry</label>
+                <select name="expiry" class="form-select form-select-sm" onchange="this.form.submit()" {{ 'disabled' if not expiries else '' }}>
+                    {% for exp in expiries %}
+                    <option value="{{ exp }}" {{ 'selected' if exp == selected_expiry else '' }}>{{ exp }}</option>
+                    {% else %}
+                    <option>No {{ selected_expiry_type }} expiries available</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-auto">
+                <button class="btn btn-outline-secondary btn-sm" type="submit">Refresh Strikes</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+{% if expiry_error %}
+<div class="alert alert-danger">{{ expiry_error }}</div>
+{% endif %}
+
+{% if strangle_preview %}
+<div class="alert alert-info">
+    Spot <strong>{{ '%.2f'|format(strangle_preview.spot) }}</strong> — at the Base Distance below, the initial strangle
+    would be CE (sell) <strong>{{ strangle_preview.ce | int }}</strong>, PE (sell) <strong>{{ strangle_preview.pe | int }}</strong>.
+    That gives an Adjustment Distance of <strong>{{ strangle_preview.adjustment_distance | int }}</strong> pts and a
+    Fresh Strangle Distance of <strong>{{ strangle_preview.fresh_distance | int }}</strong> pts (both auto-derived —
+    change Base Distance below and refresh to see them change).
+</div>
+{% endif %}
+
+<div class="card stat-card" style="max-width: 720px;">
+    <div class="card-body">
+        <form method="post" action="{{ url('/strategies/' ~ strategy.id ~ '/configure-dynamic-strangle') }}" class="row g-3">
+            <input type="hidden" name="user_strategy_id" value="{{ user_strategy_id }}">
+            <input type="hidden" name="underlying" value="{{ selected_underlying }}">
+            <input type="hidden" name="expiry_type" value="{{ selected_expiry_type }}">
+            <input type="hidden" name="expiry" value="{{ selected_expiry }}">
+
+            <div class="col-12">
+                <div class="small text-body-secondary mb-1">
+                    {{ underlyings[selected_underlying].label }} · Dynamic Strangle · intraday, daily square-off ·
+                    {{ selected_expiry_type }} · {{ selected_expiry or 'no expiry selected' }}
+                </div>
+            </div>
+
+            <div class="col-12">
+                <label class="form-label">Instance Name</label>
+                <input type="text" name="label" value="{{ existing.label if existing else '' }}" maxlength="120"
+                       class="form-control" placeholder="e.g. NIFTY Dynamic Strangle — auto-generated if left blank">
+            </div>
+
+            <div class="col-md-4">
+                <label class="form-label">Lots</label>
+                <input type="number" name="lots" min="1" value="{{ params.lots }}" class="form-control">
+            </div>
+            <div class="col-md-4">
+                <label class="form-label">Start Time</label>
+                <input type="time" name="start_time" value="{{ params.start_time }}" class="form-control">
+                <div class="form-text">Daily window for the first entry.</div>
+            </div>
+            <div class="col-md-4">
+                <label class="form-label">End Time</label>
+                <input type="time" name="end_time" value="{{ params.end_time }}" class="form-control">
+                <div class="form-text">Daily square-off — closes everything <strong>every day</strong> at this time.</div>
+            </div>
+            <div class="col-12 small text-body-secondary">
+                This is an <strong>intraday</strong> strategy — legs are placed INTRADAY (not carried across days) and
+                the whole position is force-closed at End Time every day, win or lose. The next trading day starts a
+                completely fresh strangle off that day's own opening spot.
+            </div>
+
+            <div class="col-12"><hr></div>
+
+            <div class="col-md-4">
+                <label class="form-label">Base Distance (pts)</label>
+                <input type="number" step="1" min="1" name="base_distance_points" value="{{ params.base_distance_points }}" class="form-control">
+                <div class="form-text">CE/PE strike = spot &plusmn; this at entry. The only distance you set.</div>
+            </div>
+            <div class="col-12 small text-body-secondary">
+                <strong>Adjustment Distance</strong> = Base Distance &divide; 2, and <strong>Fresh Strangle Distance</strong> =
+                Base Distance &divide; 4 — both derived automatically, then snapped to the nearest strike actually
+                available on the live chain (so the same Base Distance works correctly on NIFTY, BANKNIFTY, and SENSEX
+                without a separate per-index setting).
+                As spot moves toward one side, the <em>untested</em> side is adjusted in first, by the Adjustment
+                Distance — the tested side is left alone. Only once spot actually reaches the tested strike are
+                <strong>both</strong> legs closed and a fresh strangle opened around current spot, at the Fresh
+                Strangle Distance. Symmetric for up and down moves.
+            </div>
+
+            <div class="col-12"><hr></div>
+
+            <div class="col-md-6">
+                <label class="form-label">Daily Stop-Loss (&#8377;)</label>
+                <input type="number" step="1" name="daily_stop_loss" value="{{ params.daily_stop_loss }}" class="form-control">
+                <div class="form-text">Combined live P&amp;L across both legs. 0 disables it.</div>
+            </div>
+            <div class="col-md-6">
+                <label class="form-label">Daily Target (&#8377;)</label>
+                <input type="number" step="1" name="daily_target" value="{{ params.daily_target }}" class="form-control">
+                <div class="form-text">Combined live P&amp;L across both legs. 0 disables it.</div>
+            </div>
+            <div class="col-12 small text-body-secondary">
+                Checked continuously against realized P&amp;L so far today plus live mark-to-market on whatever's
+                still open — whichever hits first closes everything early, same as the daily End Time close.
+            </div>
+
+            <div class="col-12"><hr></div>
+
+            <div class="col-12">
+                <label class="form-label">Order Type</label>
+                <select name="order_type" class="form-select">
+                    <option value="LIMIT" {{ 'selected' if params.order_type != 'MARKET' else '' }}>Limit (safe default — no fill if price moves away)</option>
+                    <option value="MARKET" {{ 'selected' if params.order_type == 'MARKET' else '' }}>Market (fills immediately, no price protection)</option>
+                </select>
+            </div>
+
+            <div class="col-12">
+                <label class="form-label">Mode</label>
+                <select name="mode" class="form-select">
+                    <option value="paper" selected>Paper (simulated)</option>
+                    <option value="live">Live</option>
+                </select>
+            </div>
+            <div class="col-12 form-check">
+                <input type="checkbox" class="form-check-input" id="liveConfirmed" name="live_confirmed" value="true">
+                <label class="form-check-label text-danger" for="liveConfirmed">
+                    I understand Live mode places real orders with real money on my connected Dhan account. Required to actually go live — otherwise this stays in Paper mode regardless of the Mode selected above.
+                </label>
+            </div>
+
+            <div class="col-12 mt-2">
+                <button id="configureSubmitBtn" class="btn btn-primary w-100" type="submit" {{ 'disabled' if not selected_expiry else '' }}>
+                    {{ 'Update Configuration' if existing else 'Save and Enable' }}
+                </button>
+            </div>
+        </form>
+    </div>
+</div>
+{% endif %}
+{% endblock %}
