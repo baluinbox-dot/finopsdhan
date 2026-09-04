@@ -44,16 +44,6 @@ class Settings(BaseSettings):
 
     server_static_ip: str = ""
 
-    # Full public URL shown in outbound content meant to be read outside the
-    # app itself (currently just the daily strategy-summary email's closing
-    # line) -- deliberately separate from base_path/server_static_ip, which
-    # are both internal deployment plumbing, not something to guess a
-    # user-facing link from. Empty means "don't show a link" rather than
-    # falling back to guessing at server_static_ip, since that's an IP
-    # address other services share (see the VM deployment notes), not
-    # necessarily what should be advertised publicly.
-    public_app_url: str = ""
-
     # "HH:MM" (IST) the daily strategy-summary email fires at -- see
     # app.engine.daily_summary. Default is 50 minutes after every intraday
     # strategy's own 14:45 default square-off, so same-day positions have

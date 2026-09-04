@@ -199,13 +199,8 @@ def test_send_email_returns_false_and_sends_nothing_when_summary_is_empty(db_ses
     sent.assert_not_called()
 
 
-def test_send_email_includes_label_mode_margin_pnl_and_contact_line(db_session, monkeypatch):
+def test_send_email_includes_label_mode_margin_pnl_contact_line_and_disclaimer(db_session, monkeypatch):
     _no_dhan(monkeypatch)
-    from app.config import get_settings
-    get_settings.cache_clear()
-    monkeypatch.setenv("PUBLIC_APP_URL", "http://136.110.55.82/finopsdhan")
-    get_settings.cache_clear()
-
     user = _make_user(db_session, email="balu@example.com")
     us = _make_instance(db_session, user, label="SENSEX Dynamic Strangle", mode=StrategyMode.LIVE)
     _add_run(db_session, us, started_at=_now(), status="closed", realized_pnl=-350.0, entry_margin=60000.0)
@@ -228,9 +223,8 @@ def test_send_email_includes_label_mode_margin_pnl_and_contact_line(db_session, 
     assert "60,000" in captured["text_body"]
     assert "-₹350" in captured["text_body"]
     assert "balu@example.com" in captured["text_body"]
-    assert "http://136.110.55.82/finopsdhan" in captured["text_body"]
-
-    get_settings.cache_clear()
+    assert "Disclaimer : Personal Trades | For transparency only | No advice or recommendations." in captured["text_body"]
+    assert "http://" not in captured["text_body"] and "https://" not in captured["text_body"]
 
 
 # --- send_daily_summaries_for_all_users ---

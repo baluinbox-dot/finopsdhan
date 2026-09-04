@@ -18,7 +18,6 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
-from app.config import get_settings
 from app.dhan.client import DhanNotConnectedError, get_user_dhan_client
 from app.dhan.helpers import fetch_quotes
 from app.email import send_email
@@ -136,9 +135,11 @@ def _fmt_rupees(value: float | None) -> str:
     return f"-₹{abs(value):,.0f}" if value < 0 else f"₹{value:,.0f}"
 
 
+_DISCLAIMER = "Disclaimer : Personal Trades | For transparency only | No advice or recommendations."
+
+
 def _render_email(user: User, summary: dict[str, Any]) -> tuple[str, str, str]:
     """(subject, html_body, text_body)."""
-    settings = get_settings()
     date_str = summary["date"].strftime("%d %b %Y")
     subject = f"FinOps Algo — Daily Strategy Summary — {date_str}"
 
@@ -160,13 +161,8 @@ def _render_email(user: User, summary: dict[str, Any]) -> tuple[str, str, str]:
             f"Margin {_fmt_rupees(r['margin_used'])} | P&L {_fmt_rupees(r['pnl'])}{unpriced_note}"
         )
 
-    footer_lines_html = []
-    footer_lines_text = []
-    if settings.public_app_url:
-        footer_lines_html.append(f"<p>{settings.public_app_url}</p>")
-        footer_lines_text.append(settings.public_app_url)
-    footer_lines_html.append(f"<p>Interested? Reach out — {user.email}</p>")
-    footer_lines_text.append(f"Interested? Reach out — {user.email}")
+    footer_lines_html = [f"<p><em>{_DISCLAIMER}</em></p>", f"<p>Interested? Reach out — {user.email}</p>"]
+    footer_lines_text = [_DISCLAIMER, f"Interested? Reach out — {user.email}"]
 
     unpriced_notice = (
         "<p><em>One or more still-open positions couldn't be freshly priced — "
