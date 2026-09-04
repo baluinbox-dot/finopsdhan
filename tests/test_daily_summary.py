@@ -199,7 +199,7 @@ def test_send_email_returns_false_and_sends_nothing_when_summary_is_empty(db_ses
     sent.assert_not_called()
 
 
-def test_send_email_includes_label_mode_margin_pnl_contact_line_and_disclaimer(db_session, monkeypatch):
+def test_send_email_includes_label_mode_margin_pnl_contact_line_disclaimer_and_automation_note(db_session, monkeypatch):
     _no_dhan(monkeypatch)
     user = _make_user(db_session, email="balu@example.com")
     us = _make_instance(db_session, user, label="SENSEX Dynamic Strangle", mode=StrategyMode.LIVE)
@@ -225,6 +225,10 @@ def test_send_email_includes_label_mode_margin_pnl_contact_line_and_disclaimer(d
     assert "balu@example.com" in captured["text_body"]
     assert "Disclaimer : Personal Trades | For transparency only | No advice or recommendations." in captured["text_body"]
     assert "http://" not in captured["text_body"] and "https://" not in captured["text_body"]
+    assert "Fully Automated — No Manual Intervention" in captured["text_body"]
+    # Automation note sits at the top, disclaimer at the bottom -- not folded together.
+    text = captured["text_body"]
+    assert text.index("Fully Automated") < text.index("SENSEX Dynamic Strangle") < text.index("Disclaimer :")
 
 
 # --- send_daily_summaries_for_all_users ---

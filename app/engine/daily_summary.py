@@ -135,6 +135,7 @@ def _fmt_rupees(value: float | None) -> str:
     return f"-₹{abs(value):,.0f}" if value < 0 else f"₹{value:,.0f}"
 
 
+_AUTOMATION_NOTE = "Fully Automated — No Manual Intervention"
 _DISCLAIMER = "Disclaimer : Personal Trades | For transparency only | No advice or recommendations."
 
 
@@ -177,6 +178,7 @@ def _render_email(user: User, summary: dict[str, Any]) -> tuple[str, str, str]:
 
     html_body = (
         f"<h3>Daily Strategy Summary — {date_str}</h3>"
+        f"<p><strong>{_AUTOMATION_NOTE}</strong></p>"
         "<table cellpadding='6' style='border-collapse:collapse' border='1'>"
         "<tr><th>Strategy</th><th>Mode</th><th>Margin Used</th><th>P&amp;L</th></tr>"
         + "".join(html_rows) +
@@ -187,6 +189,7 @@ def _render_email(user: User, summary: dict[str, Any]) -> tuple[str, str, str]:
     )
     text_body = (
         f"Daily Strategy Summary — {date_str}\n\n"
+        f"{_AUTOMATION_NOTE}\n\n"
         + "\n".join(text_rows)
         + f"\n\nTotal P&L: {_fmt_rupees(summary['total_pnl'])}\n"
         + unpriced_notice_text
