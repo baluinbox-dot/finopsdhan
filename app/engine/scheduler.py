@@ -22,6 +22,7 @@ from sqlalchemy.orm import selectinload
 
 from app.config import get_settings
 from app.db import SessionLocal
+from app.engine.daily_summary import send_daily_summaries_for_all_users
 from app.engine.runner import run_user_strategy
 from app.models import User, UserStrategy
 
@@ -75,6 +76,22 @@ def _tick() -> None:
         pool.map(_run_one, active_ids)
 
 
+def _send_daily_summaries() -> None:
+    db = SessionLocal()
+    try:
+        sent = send_daily_summaries_for_all_users(db)
+        logger.info("Daily strategy summary: sent %d email(s)", sent)
+    except Exception:
+        logger.exception("Daily strategy summary job failed")
+    finally:
+        db.close()
+
+
+def _parse_hhmm(value: str) -> tuple[int, int]:
+    hour, minute = (value or "15:35").split(":")
+    return int(hour), int(minute)
+
+
 def start_scheduler() -> BackgroundScheduler:
     global _scheduler
     if _scheduler is not None:
@@ -90,8 +107,21 @@ def start_scheduler() -> BackgroundScheduler:
         max_instances=1,
         coalesce=True,
     )
+    summary_hour, summary_minute = _parse_hhmm(settings.daily_summary_time)
+    _scheduler.add_job(
+        _send_daily_summaries,
+        "cron",
+        hour=summary_hour,
+        minute=summary_minute,
+        id="daily_summary",
+        max_instances=1,
+        coalesce=True,
+    )
     _scheduler.start()
-    logger.info("Strategy scheduler started (interval=%ss)", settings.strategy_poll_interval_seconds)
+    logger.info(
+        "Strategy scheduler started (interval=%ss, daily summary at %02d:%02d IST)",
+        settings.strategy_poll_interval_seconds, summary_hour, summary_minute,
+    )
     return _scheduler
 
 
