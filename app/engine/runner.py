@@ -35,7 +35,7 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.dhan.client import DhanNotConnectedError, get_user_dhan_client
-from app.dhan.helpers import fetch_quotes, preview_order
+from app.dhan.helpers import fetch_combined_margin, fetch_quotes, preview_order
 from app.email import send_email
 from app.models import Order, OrderStatus, StrategyMode, StrategyRun, User, UserStrategy
 from app.strategies.base import OrderLeg, StrategyContext, currently_open_legs, leg_pnl
@@ -283,16 +283,30 @@ def _execute_entry(
         leg.price for leg in legs if leg.transaction_type == "BUY"
     )
 
+    legs_data = [asdict(leg) for leg in legs]
+
+    # Snapshot the combined margin this position blocks, for reports that
+    # run after the position has already closed (margin is otherwise only
+    # ever computed live for a currently-open run — see
+    # app.engine.pnl.compute_combined_margin). Called for paper instances
+    # too, deliberately: Dhan's margin calculator reflects what capital
+    # *would* be required regardless of whether an order is actually
+    # placed, which is exactly what a paper strategy's own margin figure
+    # should mean. Never raises and returns None on any failure (logged
+    # inside fetch_combined_margin) -- entry proceeds either way.
+    entry_margin = fetch_combined_margin(dhan_client, legs_data)
+
     run = StrategyRun(
         user_strategy_id=user_strategy_id,
         started_at=datetime.now(timezone.utc),
         status="open",
         legs_planned={
-            "legs": [asdict(leg) for leg in legs],
+            "legs": legs_data,
             "entry_premium": entry_premium,
             "params_snapshot": entry_params,
         },
         evaluation_notes=f"Entered {len(legs)} leg(s) in {'LIVE' if is_live else 'PAPER'} mode.",
+        entry_margin=entry_margin,
     )
     db.add(run)
     db.flush()  # assign run.id before orders reference it

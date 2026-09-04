@@ -174,6 +174,17 @@ class StrategyRun(Base):
     realized_pnl: Mapped[float] = mapped_column(Numeric(14, 2), default=0, nullable=False)
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
+    # Combined margin blocked (with hedge benefit), captured once right
+    # after entry via app.dhan.helpers.fetch_combined_margin — a snapshot,
+    # not continuously updated across later rolls/scale-ins. Margin isn't
+    # otherwise available after a run closes (app.engine.pnl.
+    # compute_combined_margin only ever looks at *currently open* runs), so
+    # without this a post-close report (e.g. the daily summary email) would
+    # have no margin figure at all for a run that already squared off.
+    # Nullable: None means "couldn't be fetched that pass" (e.g. Dhan call
+    # failed), not "zero margin" -- never treat it as 0 in a report.
+    entry_margin: Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)
+
     user_strategy: Mapped["UserStrategy"] = relationship(back_populates="runs")
     orders: Mapped[list["Order"]] = relationship(back_populates="strategy_run", cascade="all, delete-orphan")
 
