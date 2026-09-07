@@ -1,0 +1,91 @@
+{% extends "base.html" %}
+{% block title %}Backtest {{ strategy.name }} — FinOps Algo{% endblock %}
+{% block content %}
+<h4 class="mb-1">Backtest: {{ strategy.name }}</h4>
+<p class="text-body-secondary">{{ strategy.description }}</p>
+<p class="small text-body-secondary">
+    Runs against locally downloaded historical data, in a separate background process (not this web server) —
+    only one backtest can run at a time across the whole app, so a submission may need to wait for another
+    user's run to finish first. Uses this strategy's currently configured (or default) parameters; only the
+    underlying, date range and lots are adjustable here.
+</p>
+
+{% if lock_row %}
+<div class="alert alert-warning">
+    A backtest is currently <strong>{{ lock_row.status }}</strong> (queued {{ (lock_row.created_at | to_ist).strftime('%d %b, %H:%M') ~ ' IST' if lock_row.created_at else '' }}) —
+    submitting now will be rejected until it finishes.
+    {% if lock_row.user_id == current_user.id %}
+    <a href="{{ url('/backtest/' ~ strategy.id ~ '/runs/' ~ lock_row.id) }}">View its status →</a>
+    {% endif %}
+</div>
+{% endif %}
+
+<div class="card stat-card mb-4" style="max-width: 560px;">
+    <div class="card-body">
+        <form method="post" action="{{ url('/backtest/' ~ strategy.id) }}" class="row g-3">
+            <div class="col-12">
+                <label class="form-label small mb-0">Underlying</label>
+                <select name="underlying" class="form-select">
+                    {% for u in underlyings %}
+                    <option value="{{ u }}" {{ 'selected' if u == selected_underlying else '' }}>{{ u }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-6">
+                <label class="form-label small mb-0">Start date</label>
+                <input type="date" name="start_date" class="form-control" value="{{ earliest_data_date.isoformat() }}"
+                       min="{{ earliest_data_date.isoformat() }}" max="{{ today.isoformat() }}" required>
+            </div>
+            <div class="col-6">
+                <label class="form-label small mb-0">End date</label>
+                <input type="date" name="end_date" class="form-control" value="{{ today.isoformat() }}"
+                       min="{{ earliest_data_date.isoformat() }}" max="{{ today.isoformat() }}" required>
+            </div>
+            <div class="col-6">
+                <label class="form-label small mb-0">Lots</label>
+                <input type="number" name="lots" class="form-control" value="{{ selected_lots }}" min="1" required>
+            </div>
+            <div class="col-12">
+                <button class="btn btn-primary w-100" type="submit" {{ 'disabled' if lock_row else '' }}>Run Backtest</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<h5 class="mb-2">Your Recent Runs</h5>
+{% if not recent_runs %}
+<p class="text-body-secondary small">No backtests run yet for this strategy.</p>
+{% else %}
+<div class="table-responsive">
+    <table class="table table-sm align-middle">
+        <thead>
+            <tr>
+                <th>Started</th>
+                <th>Underlying</th>
+                <th>Range</th>
+                <th>Status</th>
+                <th></th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for run in recent_runs %}
+            <tr>
+                <td>{{ (run.created_at | to_ist).strftime('%d %b, %H:%M') ~ ' IST' if run.created_at else '' }}</td>
+                <td>{{ run.underlying }}</td>
+                <td>{{ run.start_date }} → {{ run.end_date }}</td>
+                <td>
+                    {% if run.status == 'completed' %}<span class="badge text-bg-success">Completed</span>
+                    {% elif run.status == 'failed' %}<span class="badge text-bg-danger">Failed</span>
+                    {% elif run.status == 'running' %}<span class="badge text-bg-primary">Running</span>
+                    {% else %}<span class="badge text-bg-secondary">Queued</span>{% endif %}
+                </td>
+                <td><a href="{{ url('/backtest/' ~ strategy.id ~ '/runs/' ~ run.id) }}" class="btn btn-outline-secondary btn-sm">View</a></td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
+
+<a href="{{ url('/strategies') }}" class="btn btn-link ps-0">← Back to Strategies</a>
+{% endblock %}

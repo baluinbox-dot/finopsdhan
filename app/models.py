@@ -10,9 +10,9 @@ from __future__ import annotations
 
 import enum
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
-from sqlalchemy import JSON, Boolean, DateTime, Enum, ForeignKey, Integer, Numeric, String, Text
+from sqlalchemy import JSON, Boolean, Date, DateTime, Enum, ForeignKey, Integer, Numeric, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
@@ -187,6 +187,60 @@ class StrategyRun(Base):
 
     user_strategy: Mapped["UserStrategy"] = relationship(back_populates="runs")
     orders: Mapped[list["Order"]] = relationship(back_populates="strategy_run", cascade="all, delete-orphan")
+
+
+class BacktestRun(Base):
+    """One in-app backtest request (Phase C). The actual run happens in a
+    detached OS subprocess (scripts/backtest/run_single_backtest.py), never
+    inside the live-trading uvicorn process -- loading a whole underlying's
+    historical CSV cache into memory is a few hundred MB, and this app's
+    deploy VM has a documented history of near-OOM incidents. This row is
+    the subprocess's only channel back: it writes status/result/
+    error_message here as it goes, since there's no request to respond to
+    once it's running in the background.
+
+    Deliberately app.routers.backtest enforces "one running/queued row at a
+    time, globally" against this table -- not per-user -- since the memory
+    risk is shared VM-wide regardless of who asked. See that router for the
+    staleness/cooldown safeguards built on top of status/created_at."""
+
+    __tablename__ = "backtest_runs"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    strategy_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("strategies.id", ondelete="CASCADE"), nullable=False)
+
+    underlying: Mapped[str] = mapped_column(String(20), nullable=False)
+    start_date: Mapped[date] = mapped_column(Date, nullable=False)
+    end_date: Mapped[date] = mapped_column(Date, nullable=False)
+    # The exact params this run used (a copy, not a live reference to the
+    # strategy/instance config -- those can change after this row is
+    # created, and a past run's result must stay attributable to what it
+    # actually ran against).
+    params: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+
+    # queued -> running -> completed | failed. A row stuck in queued/running
+    # well past any plausible run time (see _STALE_RUNNING_MINUTES in
+    # app.routers.backtest) is treated as abandoned -- the OS OOM-killer can
+    # SIGKILL the subprocess outright, bypassing every in-process try/except
+    # this app could otherwise rely on to mark it "failed" itself.
+    status: Mapped[str] = mapped_column(String(20), default="queued", nullable=False)
+    pid: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, nullable=False)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    error_message: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    # Summary + trade list + a downsampled (daily) equity curve -- see
+    # scripts/backtest/run_single_backtest.py for the exact shape. Never the
+    # full tick-by-tick equity curve (thousands of points over a multi-year
+    # range) -- that would bloat this row for no real benefit to a summary
+    # results page.
+    result: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+    user: Mapped["User"] = relationship()
+    strategy: Mapped["Strategy"] = relationship()
 
 
 class Order(Base):

@@ -19,7 +19,7 @@ from app.dhan.helpers import UNDERLYINGS, fetch_chain_df, fetch_daily_closes, ge
 from app.deps import CurrentUser, DbSession, SuperadminUser
 from app.engine.runner import close_user_strategy_now, enter_user_strategy_now, find_open_run
 from app.models import Strategy, StrategyMode, UserStrategy
-from app.strategies.registry import RICH_CONFIG_STRATEGIES, STRATEGY_REGISTRY, get_strategy_class
+from app.strategies.registry import BACKTEST_READY_STRATEGIES, RICH_CONFIG_STRATEGIES, STRATEGY_REGISTRY, get_strategy_class
 from app.strategies.rsi_call_writing import _resolve_target_expiry, _rsi_today_and_yesterday
 from app.templating import flash, render, url
 
@@ -104,6 +104,7 @@ def list_strategies(request: Request, db: DbSession, current_user: CurrentUser):
             "my_instances": my_instances,
             "has_dhan": has_dhan,
             "rich_config_strategies": RICH_CONFIG_STRATEGIES,
+            "backtest_ready_strategies": BACKTEST_READY_STRATEGIES,
         },
     )
 
