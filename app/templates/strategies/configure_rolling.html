@@ -166,6 +166,14 @@
                     {{ 'Update Configuration' if existing else 'Save and Enable' }}
                 </button>
             </div>
+            {% if strategy.code_ref in backtest_ready_strategies %}
+            <div class="col-12">
+                <button class="btn btn-outline-info w-100" type="submit" name="action" value="backtest"
+                        {{ 'disabled' if not selected_expiry else '' }}>
+                    📊 Save &amp; Backtest
+                </button>
+            </div>
+            {% endif %}
         </form>
     </div>
 </div>

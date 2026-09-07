@@ -293,6 +293,7 @@ def configure_strategy_form(
             "otm_preview": otm_preview,
             "params": params,
             "existing": existing,
+            "backtest_ready_strategies": BACKTEST_READY_STRATEGIES,
         },
     )
 
@@ -331,6 +332,7 @@ def configure_strategy_submit(
     order_type: str = Form("LIMIT"),
     live_confirmed: bool = Form(False),
     mode: str = Form("paper"),
+    action: str = Form("save"),
 ):
     strategy = db.get(Strategy, strategy_id)
     if strategy is None or not strategy.is_published:
@@ -403,20 +405,22 @@ def configure_strategy_submit(
         existing.params = params
         existing.mode = requested_mode
         existing.is_active = True
+        target = existing
     else:
-        db.add(
-            UserStrategy(
-                user_id=current_user.id,
-                strategy_id=strategy_id,
-                label=final_label,
-                params=params,
-                mode=requested_mode,
-                is_active=True,
-            )
+        target = UserStrategy(
+            user_id=current_user.id,
+            strategy_id=strategy_id,
+            label=final_label,
+            params=params,
+            mode=requested_mode,
+            is_active=True,
         )
+        db.add(target)
     db.commit()
 
     flash(request, f"{final_label} configured and enabled in {requested_mode.value} mode.", "success")
+    if action == "backtest":
+        return RedirectResponse(url(f"/backtest/{strategy_id}?user_strategy_id={target.id}"), status_code=303)
     return RedirectResponse(url("/strategies"), status_code=303)
 
 
@@ -645,6 +649,7 @@ def configure_rolling_form(
             "atm_preview": atm_preview,
             "params": params,
             "existing": existing,
+            "backtest_ready_strategies": BACKTEST_READY_STRATEGIES,
         },
     )
 
@@ -670,6 +675,7 @@ def configure_rolling_submit(
     order_type: str = Form("LIMIT"),
     live_confirmed: bool = Form(False),
     mode: str = Form("paper"),
+    action: str = Form("save"),
 ):
     strategy = db.get(Strategy, strategy_id)
     if strategy is None or not strategy.is_published:
@@ -731,20 +737,22 @@ def configure_rolling_submit(
         existing.params = params
         existing.mode = requested_mode
         existing.is_active = True
+        target = existing
     else:
-        db.add(
-            UserStrategy(
-                user_id=current_user.id,
-                strategy_id=strategy_id,
-                label=final_label,
-                params=params,
-                mode=requested_mode,
-                is_active=True,
-            )
+        target = UserStrategy(
+            user_id=current_user.id,
+            strategy_id=strategy_id,
+            label=final_label,
+            params=params,
+            mode=requested_mode,
+            is_active=True,
         )
+        db.add(target)
     db.commit()
 
     flash(request, f"{final_label} configured and enabled in {requested_mode.value} mode.", "success")
+    if action == "backtest":
+        return RedirectResponse(url(f"/backtest/{strategy_id}?user_strategy_id={target.id}"), status_code=303)
     return RedirectResponse(url("/strategies"), status_code=303)
 
 
@@ -1056,6 +1064,7 @@ def configure_rolling_legsl_form(
             "atm_preview": atm_preview,
             "params": params,
             "existing": existing,
+            "backtest_ready_strategies": BACKTEST_READY_STRATEGIES,
         },
     )
 
@@ -1083,6 +1092,7 @@ def configure_rolling_legsl_submit(
     order_type: str = Form("LIMIT"),
     live_confirmed: bool = Form(False),
     mode: str = Form("paper"),
+    action: str = Form("save"),
 ):
     strategy = db.get(Strategy, strategy_id)
     if strategy is None or not strategy.is_published:
@@ -1163,20 +1173,22 @@ def configure_rolling_legsl_submit(
         existing.params = params
         existing.mode = requested_mode
         existing.is_active = True
+        target = existing
     else:
-        db.add(
-            UserStrategy(
-                user_id=current_user.id,
-                strategy_id=strategy_id,
-                label=final_label,
-                params=params,
-                mode=requested_mode,
-                is_active=True,
-            )
+        target = UserStrategy(
+            user_id=current_user.id,
+            strategy_id=strategy_id,
+            label=final_label,
+            params=params,
+            mode=requested_mode,
+            is_active=True,
         )
+        db.add(target)
     db.commit()
 
     flash(request, f"{final_label} configured and enabled in {requested_mode.value} mode.", "success")
+    if action == "backtest":
+        return RedirectResponse(url(f"/backtest/{strategy_id}?user_strategy_id={target.id}"), status_code=303)
     return RedirectResponse(url("/strategies"), status_code=303)
 
 
@@ -1513,6 +1525,7 @@ def configure_iron_fly_form(
             "fly_preview": fly_preview,
             "params": params,
             "existing": existing,
+            "backtest_ready_strategies": BACKTEST_READY_STRATEGIES,
         },
     )
 
@@ -1541,6 +1554,7 @@ def configure_iron_fly_submit(
     order_type: str = Form("LIMIT"),
     live_confirmed: bool = Form(False),
     mode: str = Form("paper"),
+    action: str = Form("save"),
 ):
     strategy = db.get(Strategy, strategy_id)
     if strategy is None or not strategy.is_published:
@@ -1605,20 +1619,22 @@ def configure_iron_fly_submit(
         existing.params = params
         existing.mode = requested_mode
         existing.is_active = True
+        target = existing
     else:
-        db.add(
-            UserStrategy(
-                user_id=current_user.id,
-                strategy_id=strategy_id,
-                label=final_label,
-                params=params,
-                mode=requested_mode,
-                is_active=True,
-            )
+        target = UserStrategy(
+            user_id=current_user.id,
+            strategy_id=strategy_id,
+            label=final_label,
+            params=params,
+            mode=requested_mode,
+            is_active=True,
         )
+        db.add(target)
     db.commit()
 
     flash(request, f"{final_label} configured and enabled in {requested_mode.value} mode.", "success")
+    if action == "backtest":
+        return RedirectResponse(url(f"/backtest/{strategy_id}?user_strategy_id={target.id}"), status_code=303)
     return RedirectResponse(url("/strategies"), status_code=303)
 
 
@@ -1733,6 +1749,7 @@ def configure_dynamic_strangle_form(
             "strangle_preview": strangle_preview,
             "params": params,
             "existing": existing,
+            "backtest_ready_strategies": BACKTEST_READY_STRATEGIES,
         },
     )
 
@@ -1757,6 +1774,7 @@ def configure_dynamic_strangle_submit(
     order_type: str = Form("LIMIT"),
     live_confirmed: bool = Form(False),
     mode: str = Form("paper"),
+    action: str = Form("save"),
 ):
     strategy = db.get(Strategy, strategy_id)
     if strategy is None or not strategy.is_published:
@@ -1817,20 +1835,22 @@ def configure_dynamic_strangle_submit(
         existing.params = params
         existing.mode = requested_mode
         existing.is_active = True
+        target = existing
     else:
-        db.add(
-            UserStrategy(
-                user_id=current_user.id,
-                strategy_id=strategy_id,
-                label=final_label,
-                params=params,
-                mode=requested_mode,
-                is_active=True,
-            )
+        target = UserStrategy(
+            user_id=current_user.id,
+            strategy_id=strategy_id,
+            label=final_label,
+            params=params,
+            mode=requested_mode,
+            is_active=True,
         )
+        db.add(target)
     db.commit()
 
     flash(request, f"{final_label} configured and enabled in {requested_mode.value} mode.", "success")
+    if action == "backtest":
+        return RedirectResponse(url(f"/backtest/{strategy_id}?user_strategy_id={target.id}"), status_code=303)
     return RedirectResponse(url("/strategies"), status_code=303)
 
 
@@ -1925,6 +1945,7 @@ def configure_rsi_call_writing_form(
             "preview_error": preview_error,
             "params": params,
             "existing": existing,
+            "backtest_ready_strategies": BACKTEST_READY_STRATEGIES,
         },
     )
 
@@ -1949,6 +1970,7 @@ def configure_rsi_call_writing_submit(
     order_type: str = Form("LIMIT"),
     live_confirmed: bool = Form(False),
     mode: str = Form("paper"),
+    action: str = Form("save"),
 ):
     strategy = db.get(Strategy, strategy_id)
     if strategy is None or not strategy.is_published:
@@ -2002,20 +2024,22 @@ def configure_rsi_call_writing_submit(
         existing.params = params
         existing.mode = requested_mode
         existing.is_active = True
+        target = existing
     else:
-        db.add(
-            UserStrategy(
-                user_id=current_user.id,
-                strategy_id=strategy_id,
-                label=final_label,
-                params=params,
-                mode=requested_mode,
-                is_active=True,
-            )
+        target = UserStrategy(
+            user_id=current_user.id,
+            strategy_id=strategy_id,
+            label=final_label,
+            params=params,
+            mode=requested_mode,
+            is_active=True,
         )
+        db.add(target)
     db.commit()
 
     flash(request, f"{final_label} configured and enabled in {requested_mode.value} mode.", "success")
+    if action == "backtest":
+        return RedirectResponse(url(f"/backtest/{strategy_id}?user_strategy_id={target.id}"), status_code=303)
     return RedirectResponse(url("/strategies"), status_code=303)
 
 

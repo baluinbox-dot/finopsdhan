@@ -6,8 +6,14 @@
 <p class="small text-body-secondary">
     Runs against locally downloaded historical data, in a separate background process (not this web server) —
     only one backtest can run at a time across the whole app, so a submission may need to wait for another
-    user's run to finish first. Uses this strategy's currently configured (or default) parameters; only the
+    user's run to finish first.
+    {% if instance %}
+    Uses <strong>{{ instance.label or strategy.name }}</strong>'s currently saved parameters; only the underlying,
+    date range and lots are adjustable here.
+    {% else %}
+    You have no configured instance of this strategy yet, so this uses its published defaults; only the
     underlying, date range and lots are adjustable here.
+    {% endif %}
 </p>
 
 {% if lock_row %}
@@ -23,6 +29,7 @@
 <div class="card stat-card mb-4" style="max-width: 560px;">
     <div class="card-body">
         <form method="post" action="{{ url('/backtest/' ~ strategy.id) }}" class="row g-3">
+            <input type="hidden" name="user_strategy_id" value="{{ user_strategy_id }}">
             <div class="col-12">
                 <label class="form-label small mb-0">Underlying</label>
                 <select name="underlying" class="form-select">

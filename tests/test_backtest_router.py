@@ -75,6 +75,52 @@ def test_backtest_form_renders_for_a_ready_strategy(client, db_session):
     assert "Run Backtest" in resp.text
 
 
+def test_backtest_form_uses_the_named_instances_params_not_an_arbitrary_one(client, db_session):
+    """A user can have several instances of the same strategy at once
+    (e.g. two RSI Call Writing configs on different underlyings) --
+    without user_strategy_id, _resolve_instance would pick one arbitrarily.
+    Passing it (as the Configure page's "Save & Backtest" button now
+    always does) must make the form deterministic."""
+    strategy = _publish_strategy(client, db_session)
+    user = _register_and_login(client, db_session, "trader@example.com")
+
+    from app.models import UserStrategy
+    nifty_instance = UserStrategy(
+        user_id=user.id, strategy_id=strategy.id, label="NIFTY one",
+        params={"underlying": "NIFTY", "lots": 1}, is_active=True,
+    )
+    banknifty_instance = UserStrategy(
+        user_id=user.id, strategy_id=strategy.id, label="BANKNIFTY one",
+        params={"underlying": "BANKNIFTY", "lots": 3}, is_active=True,
+    )
+    db_session.add_all([nifty_instance, banknifty_instance])
+    db_session.commit()
+    db_session.refresh(banknifty_instance)
+
+    resp = client.get(f"/backtest/{strategy.id}?user_strategy_id={banknifty_instance.id}")
+    assert resp.status_code == 200
+    assert 'value="BANKNIFTY" selected' in resp.text
+    assert 'value="3"' in resp.text  # the BANKNIFTY instance's own lots, not the NIFTY one's
+
+
+def test_backtest_form_rejects_a_user_strategy_id_owned_by_someone_else(client, db_session):
+    strategy = _publish_strategy(client, db_session)
+    owner = _register_and_login(client, db_session, "first@example.com")
+
+    from app.models import UserStrategy
+    other_instance = UserStrategy(
+        user_id=owner.id, strategy_id=strategy.id, label="mine", params={"underlying": "NIFTY"}, is_active=True,
+    )
+    db_session.add(other_instance)
+    db_session.commit()
+    db_session.refresh(other_instance)
+
+    _register_and_login(client, db_session, "second@example.com")
+    resp = client.get(f"/backtest/{strategy.id}?user_strategy_id={other_instance.id}", follow_redirects=False)
+    assert resp.status_code == 303
+    assert resp.headers["location"] == f"/backtest/{strategy.id}"
+
+
 def test_submit_rejects_an_underlying_with_no_local_data(client, db_session, tmp_path):
     strategy = _publish_strategy(client, db_session)
     _register_and_login(client, db_session, "trader@example.com")
