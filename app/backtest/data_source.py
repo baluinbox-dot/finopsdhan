@@ -37,10 +37,14 @@ to key off, exactly the role a real security_id already plays.
 from __future__ import annotations
 
 import re
+from datetime import date, datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
+
+IST = ZoneInfo("Asia/Kolkata")
 
 # Confirmed from this app's own live strike selection across every
 # strategy (see app.dhan.helpers.UNDERLYINGS and the strikes actually
@@ -161,6 +165,31 @@ class HistoricalDataSource:
         """Every spot candle timestamp in the loaded range, ascending --
         the tick grid a backtest loop steps through."""
         return self._spot_ts
+
+    def daily_closes(self, as_of: date, lookback_days: int = 90) -> list[float]:
+        """Daily closing prices up to and including `as_of` (oldest
+        first), over the last `lookback_days` calendar days -- the last
+        5-min candle of each IST trading day counts as that day's close.
+        Mirrors app.dhan.helpers.fetch_daily_closes's own contract
+        (oldest-first list of floats) exactly, so a strategy computing an
+        indicator off it (e.g. RSI, see app.strategies.rsi_call_writing)
+        needs no changes to work against this instead of live Dhan."""
+        if self._spot_ts.size == 0:
+            return []
+        start_ts = int(datetime(as_of.year, as_of.month, as_of.day, tzinfo=IST).timestamp()) - lookback_days * 86400
+        end_ts = int(datetime(as_of.year, as_of.month, as_of.day, 23, 59, 59, tzinfo=IST).timestamp())
+        mask = (self._spot_ts >= start_ts) & (self._spot_ts <= end_ts)
+        ts_in_range = self._spot_ts[mask]
+        close_in_range = self._spot_close[mask]
+        if ts_in_range.size == 0:
+            return []
+        # _spot_ts is sorted ascending, so iterating in order and
+        # overwriting by_day[d] naturally keeps each day's LAST candle.
+        by_day: dict[date, float] = {}
+        for t, c in zip(ts_in_range, close_in_range):
+            d = datetime.fromtimestamp(int(t), tz=IST).date()
+            by_day[d] = float(c)
+        return [by_day[d] for d in sorted(by_day)]
 
     def security_id_for(self, strike: float, side: str) -> str:
         code = _UNDERLYING_CODE[self.underlying]

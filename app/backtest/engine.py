@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import importlib
 from dataclasses import asdict, dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -116,6 +116,12 @@ class _Runner:
         self.opened_at: datetime | None = None
         self.today_run_count = 0
         self.current_date: date | None = None
+        # Mirrors app.engine.runner._week_run_count -- since this Monday
+        # 00:00 IST, not just today (RSI Call Writing is the first
+        # strategy needing this: it stays flat for the rest of the week
+        # after a stop, not just the rest of the day).
+        self.week_run_count = 0
+        self.current_week_monday: date | None = None
         self.used_stale_price = False
         # {security_id: (last known price, date it was last actually
         # observed)} -- scoped to the *current* run only (cleared in
@@ -208,6 +214,7 @@ class _Runner:
         )
         self.opened_at = now_ist
         self.today_run_count += 1
+        self.week_run_count += 1
 
     def close_all(self, ts: int, today: date) -> bool:
         """All-or-nothing: only actually closes anything if every
@@ -275,8 +282,16 @@ def _tick(runner: _Runner, ts: int, now_ist: datetime, impl: Strategy, params: d
         runner.current_date = today
         runner.today_run_count = 0
 
+    this_monday = today - timedelta(days=today.weekday())
+    if this_monday != runner.current_week_monday:
+        runner.current_week_monday = this_monday
+        runner.week_run_count = 0
+
     if not runner.is_open:
-        ctx = StrategyContext(dhan_client=None, params=params, today_run_count=runner.today_run_count)
+        ctx = StrategyContext(
+            dhan_client=None, params=params,
+            today_run_count=runner.today_run_count, week_run_count=runner.week_run_count,
+        )
         legs = impl.evaluate_entry(ctx)
         if legs:
             runner.start_run(now_ist, legs)
@@ -377,6 +392,21 @@ def run_backtest(
     def _now() -> datetime:
         return current_now[0]
 
+    def _daily_closes(*_a: Any, lookback_days: int = 90, **_k: Any) -> list[float]:
+        return ds.daily_closes(current_now[0].date(), lookback_days)
+
+    # Precomputed once, wide enough for the whole run -- list_expiries
+    # (RSI Call Writing) filters this to "today onward" at call time,
+    # same shape as the live endpoint's own "current and upcoming" only.
+    # Same documented-approximation caveat as auto_advance_expiry: Dhan's
+    # list_expiries is a *live* endpoint, so there is no way to recover
+    # real historical expiry-day-of-week from any API call.
+    all_synthetic_expiries = weekly_expiries(start, end, expiry_weekday)
+
+    def _list_expiries(*_a: Any, **_k: Any) -> list[str]:
+        today = current_now[0].date()
+        return [e for e in all_synthetic_expiries if date.fromisoformat(e) >= today]
+
     patchers = []
     if hasattr(module, "fetch_chain_df"):
         patchers.append(patch.object(module, "fetch_chain_df", side_effect=_chain))
@@ -388,6 +418,10 @@ def run_backtest(
         patchers.append(patch.object(module, "get_lot_size", return_value=lot_size))
     if hasattr(module, "_now_ist"):
         patchers.append(patch.object(module, "_now_ist", side_effect=_now))
+    if hasattr(module, "fetch_daily_closes"):
+        patchers.append(patch.object(module, "fetch_daily_closes", side_effect=_daily_closes))
+    if hasattr(module, "list_expiries"):
+        patchers.append(patch.object(module, "list_expiries", side_effect=_list_expiries))
 
     all_ts = ds.timestamps()
     start_ts = int(datetime(start.year, start.month, start.day, tzinfo=IST).timestamp())
@@ -400,7 +434,12 @@ def run_backtest(
     impl = strategy_cls()
     runner = _Runner(ds, cost_model, stale_close_days=stale_close_days)
 
-    expiries = weekly_expiries(start, end, expiry_weekday) if auto_advance_expiry else []
+    # Reuse the same precomputed calendar built above for list_expiries --
+    # auto_advance_expiry and list_expiries patching are independent
+    # features (Iron Condor/Iron Fly vs RSI Call Writing) but both only
+    # ever need "the weekly calendar for this run," so one computation
+    # covers both instead of building it twice.
+    expiries = all_synthetic_expiries if auto_advance_expiry else []
 
     for p in patchers:
         p.start()

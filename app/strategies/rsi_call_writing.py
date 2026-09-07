@@ -347,4 +347,4 @@ class RSICallWritingStrategy(Strategy):
             price=float(row["ce_ltp"]),
             role="primary",
         )
-        return {"close_security_ids": [str(leg["security_id"])], "new_legs": [new_leg]}
+        return {"rolls": [{"close_security_ids": [str(leg["security_id"])], "new_legs": [new_leg]}]}

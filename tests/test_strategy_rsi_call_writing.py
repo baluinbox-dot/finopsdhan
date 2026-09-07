@@ -336,8 +336,15 @@ def test_rolls_to_next_week_on_expiry_day():
         decision = strategy.evaluate_rolls(ctx, notes)
 
     assert decision is not None
-    assert decision["close_security_ids"] == [_ce_id(25250)]
-    new_leg = decision["new_legs"][0]
+    # Regression: evaluate_rolls must nest its roll under "rolls" -- the
+    # real contract app.engine.runner._apply_rolls (and the backtest
+    # engine's _Runner.apply_rolls) reads decision.get("rolls") or [], not
+    # a flat close_security_ids/new_legs at the top level. A flat dict
+    # here means the roll silently never applies in either engine.
+    assert list(decision.keys()) == ["rolls"]
+    roll = decision["rolls"][0]
+    assert roll["close_security_ids"] == [_ce_id(25250)]
+    new_leg = roll["new_legs"][0]
     assert new_leg.trading_symbol.split()[3] == _EXPIRY_NEXT  # rolled forward, not stayed on today's
     assert int(new_leg.trading_symbol.split()[1]) == 25250
     assert new_leg.transaction_type == "SELL"

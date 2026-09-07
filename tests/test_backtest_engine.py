@@ -7,7 +7,7 @@ it against the real 244MB downloaded dataset."""
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -19,6 +19,7 @@ from app.backtest.data_source import HistoricalDataSource
 from app.backtest.engine import _Runner, run_backtest
 from app.strategies.base import OrderLeg
 from app.strategies.dynamic_strangle import DynamicStrangleStrategy
+from app.strategies.rsi_call_writing import RSICallWritingStrategy
 
 IST = ZoneInfo("Asia/Kolkata")
 _DAY = date(2024, 9, 4)
@@ -203,3 +204,70 @@ def test_apply_rolls_reads_the_nested_rolls_list(data_root: Path):
     assert len(runner.legs) == 2  # old (now closed) + the new one appended
     assert runner.legs[-1]["security_id"] == new_leg.security_id
     assert runner.legs_opened_count == 1  # only the new leg counts as a fresh open
+
+
+def test_rsi_call_writing_enters_off_a_daily_close_cross(tmp_path: Path):
+    """RSI Call Writing is the first strategy needing two capabilities no
+    other strategy exercises in the engine: list_expiries (to resolve its
+    target weekly expiry) and fetch_daily_closes (to compute its RSI
+    signal off the underlying's own historical daily closes, not the
+    intraday chain) -- this proves both patchers are wired into
+    run_backtest and a genuine RSI cross-down fires a real entry that can
+    later be closed (i.e. quotes keep flowing correctly afterward too).
+
+    rsi_period=1 makes the cross condition exactly reproducible without
+    hand-computing real Wilder's smoothing: with period 1, RSI collapses
+    to "100 if the latest daily change was up, 0 if down" (avg_gain/
+    avg_loss reduce to just the most recent change). So a close sequence
+    that goes up then down guarantees rsi_yesterday=100 (>=70) and
+    rsi_today=0 (<70) -- a clean cross-down through 70. If either patch
+    were missing or wrong (list_expiries returning None, daily_closes
+    never called), evaluate_entry returns None and result.trades stays
+    empty -- this test would fail either way without needing to inspect
+    the strategy's own leg-selection logic (already covered directly in
+    tests/test_strategy_rsi_call_writing.py).
+    """
+    day0, day1, entry_day = date(2024, 9, 2), date(2024, 9, 3), date(2024, 9, 4)  # Mon, Tue, Wed
+    exit_day = date(2024, 9, 6)  # Fri -- a later tick to prove the position can still be priced/closed afterward
+    check_ts = [
+        int(datetime(d.year, d.month, d.day, 15, 25, tzinfo=IST).timestamp())
+        for d in (day0, day1, entry_day, exit_day)
+    ]
+    spot_closes = [25000.0, 25200.0, 25000.0, 25000.0]  # up then down -> cross-down through 70 on entry_day
+
+    root = tmp_path / "backtest"
+    _write_csv(root / "NIFTY" / "spot_5min" / "chunk.csv", [
+        {"timestamp": ts, "open": px, "high": px, "low": px, "close": px, "volume": 0}
+        for ts, px in zip(check_ts, spot_closes)
+    ])
+    # entry_day's spot (25000) * 1.01 offset -> nearest strike 25250 (ATM+5, same convention as data_source's own fixture).
+    # Premium rises from 60 (entry) to 100 by exit_day -- well past the 50%
+    # stop_loss_pct threshold (90), so the position actually closes instead
+    # of sitting open past the end of this tiny fixture's data.
+    _write_csv(root / "NIFTY" / "options" / "CE" / "ATM+5" / "chunk.csv", [
+        {"timestamp": check_ts[2], "open": 60, "high": 60, "low": 60, "close": 60.0, "oi": 100, "spot": 25000.0},
+        {"timestamp": check_ts[3], "open": 100, "high": 100, "low": 100, "close": 100.0, "oi": 100, "spot": 25000.0},
+    ])
+
+    params = {
+        "underlying": "NIFTY", "lots": 1, "entry_check_time": "15:25", "rsi_period": 1,
+        "rsi_cross_level": 70, "strike_offset_pct": 1.0, "stop_loss_pct": 50,
+        "profit_lock_trigger_pct": 35, "profit_lock_stop_pct": 85, "order_type": "MARKET",
+    }
+
+    # end extends past exit_day purely so the precomputed weekly-expiry
+    # calendar list_expiries hands back actually contains that week's
+    # Thursday -- no extra data is needed for those days since ticks are
+    # still bounded by what's actually on disk (entry_day and exit_day only).
+    result = run_backtest(
+        RSICallWritingStrategy, params, underlying="NIFTY", lots=1,
+        start=entry_day, end=exit_day + timedelta(days=5), data_root=root, cost_model=CostModel(),
+    )
+
+    assert len(result.trades) == 1
+    trade = result.trades[0]
+    assert trade.opened_at.date() == entry_day
+    assert trade.closed_at.date() == exit_day
+    assert trade.reason == "evaluate_leg_exits"  # stop-loss, not a forced end-of-range close
+    assert trade.legs_opened == 1  # no roll -- closed by the stop before reaching expiry day
+    assert trade.realized_pnl < -1000  # short call, premium 60 -> 100 against it: a real, substantial loss
