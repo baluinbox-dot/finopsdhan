@@ -1,0 +1,238 @@
+<title>Dynamic Strangle Backtest</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Public+Sans:wght@400;500;600&display=swap">
+<style>
+:root{
+  --bg:#F2F1EA; --surface:#FFFFFF; --surface-sunken:#EAE8DF;
+  --ink:#1E2321; --ink-soft:#54584F; --ink-mute:#8A8C7F;
+  --line:#D8D6C9; --line-strong:#B9B7A6;
+  --accent:#9A5A1E; --accent-ink:#5C350F; --accent-soft:#F0DFC8;
+  --profit:#0F6E56; --profit-soft:#DCEFE7; --profit-ink:#08423A;
+  --loss:#993C1D; --loss-soft:#F5E1D6; --loss-ink:#601E0C;
+  --font-display:'Space Mono',ui-monospace,'SF Mono',monospace;
+  --font-body:'Public Sans',-apple-system,sans-serif;
+  --font-data:'Space Mono',ui-monospace,monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#15181B; --surface:#1E2225; --surface-sunken:#191C1F;
+    --ink:#E9E7DC; --ink-soft:#AFAD9F; --ink-mute:#75766C;
+    --line:#33362F; --line-strong:#484A40;
+    --accent:#D99A4E; --accent-ink:#F3D9AE; --accent-soft:#332A1B;
+    --profit:#4FBE98; --profit-soft:#16241F; --profit-ink:#8FDDBE;
+    --loss:#E08258; --loss-soft:#2A1B14; --loss-ink:#F0B392;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#15181B; --surface:#1E2225; --surface-sunken:#191C1F;
+  --ink:#E9E7DC; --ink-soft:#AFAD9F; --ink-mute:#75766C;
+  --line:#33362F; --line-strong:#484A40;
+  --accent:#D99A4E; --accent-ink:#F3D9AE; --accent-soft:#332A1B;
+  --profit:#4FBE98; --profit-soft:#16241F; --profit-ink:#8FDDBE;
+  --loss:#E08258; --loss-soft:#2A1B14; --loss-ink:#F0B392;
+}
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--ink);font-family:var(--font-body);margin:0}
+.wrap{max-width:1040px;margin:0 auto;padding:2.5rem 1.5rem 4rem}
+.masthead{display:flex;justify-content:space-between;align-items:flex-end;gap:1.5rem;border-bottom:2px solid var(--ink);padding-bottom:1.25rem;margin-bottom:2rem;flex-wrap:wrap}
+.masthead h1{font-family:var(--font-display);font-weight:700;font-size:26px;margin:0 0 .35rem;letter-spacing:-.01em;text-wrap:balance}
+.masthead .meta{font-size:13px;color:var(--ink-soft)}
+.masthead .meta span{color:var(--ink);font-weight:500}
+.ticker{font-family:var(--font-data);font-size:12px;color:var(--ink-mute);text-transform:uppercase;letter-spacing:.06em}
+section{margin-bottom:2.75rem}
+h2{font-family:var(--font-display);font-weight:700;font-size:15px;text-transform:uppercase;letter-spacing:.05em;color:var(--ink);margin:0 0 1rem;padding-bottom:.5rem;border-bottom:1px solid var(--line)}
+.note{font-size:13.5px;line-height:1.65;color:var(--ink-soft);max-width:66ch;margin:.75rem 0 0}
+.note strong{color:var(--ink);font-weight:600}
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:1px;background:var(--line);border:1px solid var(--line);border-radius:10px;overflow:hidden}
+.kpi{background:var(--surface);padding:1rem 1.1rem}
+.kpi .label{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--ink-mute);margin-bottom:.4rem}
+.kpi .value{font-family:var(--font-data);font-size:22px;font-weight:700;font-variant-numeric:tabular-nums}
+.pos{color:var(--profit)} .neg{color:var(--loss)}
+.chart-card{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:1.25rem 1.25rem .5rem}
+.chart-legend{display:flex;gap:1.25rem;font-size:12px;color:var(--ink-soft);margin-bottom:.5rem;font-family:var(--font-data)}
+.chart-legend .sw{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:5px;vertical-align:1px}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{text-align:right;font-family:var(--font-display);font-weight:700;font-size:10.5px;text-transform:uppercase;letter-spacing:.04em;color:var(--ink-mute);padding:.55rem .65rem;border-bottom:1.5px solid var(--ink)}
+th:first-child,td:first-child{text-align:left}
+td{text-align:right;padding:.55rem .65rem;border-bottom:1px solid var(--line);font-family:var(--font-data);font-variant-numeric:tabular-nums}
+tbody tr.headline{background:var(--accent-soft)}
+tbody tr.headline td:first-child{font-weight:700;color:var(--accent-ink)}
+.table-wrap{overflow-x:auto;border:1px solid var(--line);border-radius:12px;background:var(--surface)}
+.table-wrap table{border-radius:12px}
+.table-wrap tr:last-child td{border-bottom:none}
+.pill{display:inline-block;font-family:var(--font-data);font-size:11px;padding:.15rem .5rem;border-radius:5px;font-weight:700}
+.pill.win{background:var(--profit-soft);color:var(--profit-ink)}
+.pill.loss{background:var(--loss-soft);color:var(--loss-ink)}
+.selector{display:flex;gap:.4rem;flex-wrap:wrap;margin-bottom:1rem}
+.selector button{font-family:var(--font-data);font-size:12px;padding:.4rem .75rem;border-radius:7px;border:1px solid var(--line-strong);background:var(--surface);color:var(--ink-soft);cursor:pointer}
+.selector button.active{background:var(--ink);color:var(--bg);border-color:var(--ink)}
+.caveat{background:var(--loss-soft);border:1px solid var(--loss);border-radius:10px;padding:.9rem 1.1rem;font-size:13px;line-height:1.6;color:var(--loss-ink)}
+.caveat strong{font-weight:700}
+footer{margin-top:3rem;padding-top:1.25rem;border-top:1px solid var(--line);font-size:11.5px;color:var(--ink-mute);font-family:var(--font-data)}
+</style>
+
+<div class="wrap">
+  <div class="masthead">
+    <div>
+      <div class="ticker" id="hl-underlying">NIFTY · Dynamic Strangle</div>
+      <h1>Base distance sweep, 2 years of local history</h1>
+      <div class="meta">Window <span id="hl-range">—</span> · <span id="hl-count">6</span> parameter values tested</div>
+    </div>
+  </div>
+
+  <section>
+    <h2>Headline run — base distance <span id="hl-bd"></span></h2>
+    <div class="kpis" id="kpi-row"></div>
+    <p class="note">Picked as the sweep's best net P&amp;L, not necessarily the most reliable — see the coverage caveat below before trusting a specific number over another candidate.</p>
+  </section>
+
+  <section>
+    <h2>Equity curve</h2>
+    <div class="chart-card">
+      <div class="chart-legend"><span><span class="sw" style="background:var(--accent)"></span>Cumulative P&amp;L, net of costs</span></div>
+      <div style="position:relative;height:280px">
+        <canvas id="equityChart" role="img" aria-label="Line chart of cumulative profit and loss over the backtest window for the headline base distance">Equity curve chart — see the daily P&amp;L values in the data below.</canvas>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Base distance comparison</h2>
+    <div class="chart-card">
+      <div class="chart-legend"><span><span class="sw" style="background:var(--profit)"></span>Net profit</span><span><span class="sw" style="background:var(--loss)"></span>Net loss</span></div>
+      <div style="position:relative;height:220px">
+        <canvas id="sweepChart" role="img" aria-label="Bar chart comparing net profit and loss across every tested base distance">Bar chart of net P&amp;L per base distance — see the table below for exact figures.</canvas>
+      </div>
+    </div>
+    <div class="table-wrap" style="margin-top:1rem">
+      <table>
+        <thead><tr><th>Base distance</th><th>Trades</th><th>Win rate</th><th>Net P&amp;L</th><th>Costs</th><th>Max drawdown</th><th>Avg / trade</th></tr></thead>
+        <tbody id="sweep-table"></tbody>
+      </table>
+    </div>
+    <div class="caveat" style="margin-top:1rem">
+      <strong>Coverage caveat:</strong> base distance 500 shows unusually few trades and long flat stretches in its equity curve — a position occasionally drifts far enough (as spot moves) that its strike falls entirely outside the ~±15-strike band this data was downloaded for, and the daily square-off can't get a fresh price to close it. It's left in the comparison for honesty, not hidden, but treat its numbers as less reliable than the rest until the download is widened for that case.
+    </div>
+  </section>
+
+  <section>
+    <h2>Trade log</h2>
+    <div class="selector" id="trade-selector"></div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Opened</th><th>Closed</th><th>Legs</th><th>Reason</th><th>Costs</th><th>P&amp;L</th></tr></thead>
+        <tbody id="trade-table"></tbody>
+      </table>
+    </div>
+    <p class="note">Most recent 40 trades for the selected base distance.</p>
+  </section>
+
+  <footer>app/backtest/engine.py · Phase 2/3 · local research tooling, never touches the live trading DB</footer>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<script id="report-data" type="application/json">__REPORT_DATA__</script>
+<script>
+const DATA = JSON.parse(document.getElementById('report-data').textContent);
+const fmtRs = (v) => (v < 0 ? '-Rs ' : 'Rs ') + Math.abs(Math.round(v)).toLocaleString('en-IN');
+const fmtDate = (iso) => new Date(iso).toLocaleDateString('en-GB', {day:'2-digit', month:'short', year:'2-digit'});
+const fmtTime = (iso) => new Date(iso).toLocaleTimeString('en-GB', {hour:'2-digit', minute:'2-digit'});
+
+document.getElementById('hl-range').textContent = `${fmtDate(DATA.start)} → ${fmtDate(DATA.end)}`;
+document.getElementById('hl-count').textContent = DATA.runs.length;
+
+const headline = DATA.runs.find(r => r.base_distance === DATA.headline_base_distance);
+document.getElementById('hl-bd').textContent = headline.base_distance.toLocaleString('en-IN');
+
+const kpis = [
+  ['Trades', headline.trade_count, null],
+  ['Win rate', headline.win_rate + '%', null],
+  ['Net P&L', fmtRs(headline.total_pnl), headline.total_pnl >= 0 ? 'pos' : 'neg'],
+  ['Total costs', fmtRs(headline.total_costs), null],
+  ['Max drawdown', fmtRs(headline.max_drawdown), 'neg'],
+  ['Avg / trade', fmtRs(headline.avg_pnl_per_trade), headline.avg_pnl_per_trade >= 0 ? 'pos' : 'neg'],
+];
+document.getElementById('kpi-row').innerHTML = kpis.map(([label, value, cls]) =>
+  `<div class="kpi"><div class="label">${label}</div><div class="value ${cls||''}">${value}</div></div>`
+).join('');
+
+const cssVar = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+
+new Chart(document.getElementById('equityChart'), {
+  type: 'line',
+  data: {
+    labels: headline.equity_curve_daily.map(p => p.date),
+    datasets: [{
+      data: headline.equity_curve_daily.map(p => p.pnl),
+      borderColor: '#9A5A1E', backgroundColor: 'rgba(154,90,30,0.1)',
+      fill: true, borderWidth: 2, pointRadius: 0, tension: 0.15,
+    }],
+  },
+  options: {
+    responsive: true, maintainAspectRatio: false,
+    plugins: { legend: { display: false } },
+    scales: {
+      x: { ticks: { color: cssVar('--ink-mute'), maxTicksLimit: 8, font: {family: 'Space Mono', size: 10} }, grid: { color: cssVar('--line') } },
+      y: { ticks: { color: cssVar('--ink-mute'), font: {family: 'Space Mono', size: 10}, callback: fmtRs }, grid: { color: cssVar('--line') } },
+    },
+  },
+});
+
+const sweep = [...DATA.runs].sort((a, b) => a.base_distance - b.base_distance);
+new Chart(document.getElementById('sweepChart'), {
+  type: 'bar',
+  data: {
+    labels: sweep.map(r => r.base_distance.toLocaleString('en-IN')),
+    datasets: [{
+      data: sweep.map(r => r.total_pnl),
+      backgroundColor: sweep.map(r => r.total_pnl >= 0 ? '#0F6E56' : '#993C1D'),
+      borderRadius: 4, maxBarThickness: 40,
+    }],
+  },
+  options: {
+    responsive: true, maintainAspectRatio: false,
+    plugins: { legend: { display: false } },
+    scales: {
+      x: { ticks: { color: cssVar('--ink-mute'), font: {family: 'Space Mono', size: 11} }, grid: { display: false } },
+      y: { ticks: { color: cssVar('--ink-mute'), font: {family: 'Space Mono', size: 10}, callback: fmtRs }, grid: { color: cssVar('--line') } },
+    },
+  },
+});
+
+document.getElementById('sweep-table').innerHTML = sweep.map(r => `
+  <tr class="${r.base_distance === DATA.headline_base_distance ? 'headline' : ''}">
+    <td>${r.base_distance.toLocaleString('en-IN')}</td>
+    <td>${r.trade_count}</td>
+    <td>${r.win_rate}%</td>
+    <td class="${r.total_pnl >= 0 ? 'pos' : 'neg'}">${fmtRs(r.total_pnl)}</td>
+    <td>${fmtRs(r.total_costs)}</td>
+    <td class="neg">${fmtRs(r.max_drawdown)}</td>
+    <td class="${r.avg_pnl_per_trade >= 0 ? 'pos' : 'neg'}">${fmtRs(r.avg_pnl_per_trade)}</td>
+  </tr>
+`).join('');
+
+function renderTrades(bd) {
+  const run = DATA.runs.find(r => r.base_distance === bd);
+  document.getElementById('trade-table').innerHTML = run.recent_trades.slice().reverse().map(t => `
+    <tr>
+      <td>${fmtDate(t.opened_at)} ${fmtTime(t.opened_at)}</td>
+      <td>${fmtDate(t.closed_at)} ${fmtTime(t.closed_at)}</td>
+      <td>${t.legs_opened}</td>
+      <td><span class="pill ${t.realized_pnl >= 0 ? 'win' : 'loss'}">${t.reason.replace('evaluate_', '')}</span></td>
+      <td>${fmtRs(t.costs)}</td>
+      <td class="${t.realized_pnl >= 0 ? 'pos' : 'neg'}">${fmtRs(t.realized_pnl)}</td>
+    </tr>
+  `).join('');
+  document.querySelectorAll('#trade-selector button').forEach(b =>
+    b.classList.toggle('active', Number(b.dataset.bd) === bd)
+  );
+}
+
+document.getElementById('trade-selector').innerHTML = sweep.map(r =>
+  `<button data-bd="${r.base_distance}">${r.base_distance.toLocaleString('en-IN')}</button>`
+).join('');
+document.querySelectorAll('#trade-selector button').forEach(b =>
+  b.addEventListener('click', () => renderTrades(Number(b.dataset.bd)))
+);
+renderTrades(DATA.headline_base_distance);
+</script>
