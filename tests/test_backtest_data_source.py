@@ -105,3 +105,50 @@ def test_quote_for_none_for_a_different_underlying():
     ds = HistoricalDataSource("BANKNIFTY", Path("/nonexistent"))
     nifty_sid = HistoricalDataSource("NIFTY", Path("/nonexistent")).security_id_for(25250, "CE")
     assert ds.quote_for(nifty_sid, 1000) is None
+
+
+@pytest.fixture()
+def multi_day_data_root(tmp_path: Path) -> Path:
+    """Three trading days, one candle per day (10:00 IST), each a
+    distinct close -- realistic epoch timestamps this time, since
+    daily_closes needs real calendar dates to group by."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    ist = ZoneInfo("Asia/Kolkata")
+    root = tmp_path / "backtest"
+    days = [
+        (datetime(2024, 9, 4, 10, 0, tzinfo=ist), 25000.0),
+        (datetime(2024, 9, 4, 14, 0, tzinfo=ist), 25050.0),  # same day, later -> day's close should be this one
+        (datetime(2024, 9, 5, 10, 0, tzinfo=ist), 25100.0),
+        (datetime(2024, 9, 6, 10, 0, tzinfo=ist), 25200.0),
+    ]
+    _write_csv(root / "NIFTY" / "spot_5min" / "chunk.csv", [
+        {"timestamp": int(dt.timestamp()), "open": px, "high": px, "low": px, "close": px, "volume": 0}
+        for dt, px in days
+    ])
+    return root
+
+
+def test_daily_closes_takes_the_last_candle_of_each_day(multi_day_data_root: Path):
+    from datetime import date
+
+    ds = HistoricalDataSource("NIFTY", multi_day_data_root)
+    closes = ds.daily_closes(date(2024, 9, 6), lookback_days=90)
+    assert closes == [25050.0, 25100.0, 25200.0]  # oldest first; 09-04's 14:00 candle wins over 10:00
+
+
+def test_daily_closes_respects_lookback_window(multi_day_data_root: Path):
+    from datetime import date
+
+    ds = HistoricalDataSource("NIFTY", multi_day_data_root)
+    # A 0-day lookback still starts at as_of's own midnight -> only 09-06 itself.
+    closes = ds.daily_closes(date(2024, 9, 6), lookback_days=0)
+    assert closes == [25200.0]
+
+
+def test_daily_closes_empty_when_no_data():
+    from datetime import date
+
+    ds = HistoricalDataSource("NIFTY", Path("/nonexistent"))
+    assert ds.daily_closes(date(2024, 9, 6)) == []
