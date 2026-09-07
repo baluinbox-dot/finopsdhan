@@ -56,6 +56,12 @@ class Trade:
     realized_pnl: float  # net of costs
     costs: float
     legs_opened: int  # total legs ever opened this trade, including rolls/scale-ins
+    # True if at least one leg's close price came from the stale-price
+    # fallback (see _Runner.stale_close_days) rather than a fresh quote --
+    # this trade's realized_pnl and closed_at are an approximation, not
+    # what would really have happened; flag it in reports rather than
+    # presenting it as equally trustworthy as a normally-closed trade.
+    used_stale_price: bool = False
 
 
 @dataclass
@@ -94,9 +100,13 @@ class _Runner:
     """Holds the in-memory position state a real StrategyRun would hold
     in the DB, for one backtest's replay loop."""
 
-    def __init__(self, ds: HistoricalDataSource, cost_model: CostModel):
+    def __init__(self, ds: HistoricalDataSource, cost_model: CostModel, stale_close_days: int = 5):
         self.ds = ds
         self.costs = cost_model
+        # A leg unpriceable for this many days straight is force-closed at
+        # its last known price instead of blocking forever (see
+        # _resolve_price's docstring for why this exists).
+        self.stale_close_days = stale_close_days
         self.legs: list[dict[str, Any]] = []
         self.leg_state: dict[str, dict[str, Any]] = {}
         self.entry_premium = 0.0
@@ -106,6 +116,12 @@ class _Runner:
         self.opened_at: datetime | None = None
         self.today_run_count = 0
         self.current_date: date | None = None
+        self.used_stale_price = False
+        # {security_id: (last known price, date it was last actually
+        # observed)} -- scoped to the *current* run only (cleared in
+        # start_run), so a strike revisited by a much later, unrelated
+        # run never inherits a stale price left over from this one.
+        self.last_priced: dict[str, tuple[float, date]] = {}
 
     @property
     def is_open(self) -> bool:
@@ -117,25 +133,61 @@ class _Runner:
             "entry_premium": self.entry_premium, "realized_pnl_so_far": self.realized_pnl_so_far,
         }
 
-    def _record_entry_leg(self, leg: OrderLeg) -> None:
+    def note_price(self, sid: str, price: float, today: date) -> None:
+        """Record a fresh, successfully-observed price for a currently
+        open leg -- called every tick (see _tick's unrealized-P&L loop,
+        which already fetches a price for every open leg anyway), so
+        `_resolve_price`'s staleness fallback always has the most recent
+        real observation to fall back to, not just whatever price was
+        available at entry or the last close attempt specifically."""
+        self.last_priced[sid] = (price, today)
+
+    def _resolve_price(self, ts: int, today: date, sid: str) -> tuple[float, bool] | None:
+        """(price, is_stale) to close `sid` at, or None if it can't be
+        closed at all right now. Tries a fresh quote first; if that's
+        unavailable, falls back to the last price actually observed for
+        this leg, but ONLY once `stale_close_days` have passed since that
+        observation -- a leg that's merely had one bad tick still waits
+        for a real price, same as the live engine always has; only a
+        leg that's been unpriceable for a real stretch (drifted outside
+        the downloaded strike band and stayed there) gets force-closed
+        on an approximation, so a backtest can never hang indefinitely on
+        one stuck leg the way a live position theoretically could."""
+        quote = self.ds.quote_for(sid, ts)
+        if quote is not None:
+            self.note_price(sid, quote, today)
+            return quote, False
+        last = self.last_priced.get(sid)
+        if last is None:
+            return None
+        last_price, last_date = last
+        if (today - last_date).days >= self.stale_close_days:
+            return last_price, True
+        return None
+
+    def _record_entry_leg(self, leg: OrderLeg, today: date) -> None:
         fill_price = self.costs.fill_price(leg.price, leg.transaction_type)
         self.total_costs_so_far += self.costs.order_cost(fill_price, leg.quantity, leg.transaction_type)
         data = asdict(leg)
         data["price"] = fill_price
         self.legs.append(data)
         self.legs_opened_count += 1
+        self.note_price(str(leg.security_id), fill_price, today)  # entry fill is the first "last known price"
 
-    def _close_leg(self, ts: int, leg_data: dict[str, Any]) -> bool:
-        """Close one currently-open leg at a fresh simulated quote,
-        exactly mirroring app.engine.runner._close_open_run's math
-        (leg_pnl against the *original* entry price, never a synthetic
-        appended "exit leg"). Returns False (leaves the leg open, same as
-        a live failed quote fetch) if no price is available right now."""
-        quote = self.ds.quote_for(leg_data["security_id"], ts)
-        if quote is None:
+    def _close_leg(self, ts: int, today: date, leg_data: dict[str, Any]) -> bool:
+        """Close one currently-open leg, exactly mirroring
+        app.engine.runner._close_open_run's math (leg_pnl against the
+        *original* entry price, never a synthetic appended "exit leg").
+        Returns False (leaves the leg open) if _resolve_price can't
+        produce a price at all right now."""
+        resolved = self._resolve_price(ts, today, str(leg_data["security_id"]))
+        if resolved is None:
             return False
+        price, is_stale = resolved
+        if is_stale:
+            self.used_stale_price = True
         exit_side = _opposite(leg_data["transaction_type"])
-        fill_price = self.costs.fill_price(quote, exit_side)
+        fill_price = self.costs.fill_price(price, exit_side)
         self.total_costs_so_far += self.costs.order_cost(fill_price, leg_data["quantity"], exit_side)
         self.realized_pnl_so_far += leg_pnl(leg_data, fill_price)
         self.leg_state[str(leg_data["security_id"])] = {"status": "closed"}
@@ -147,37 +199,40 @@ class _Runner:
         self.total_costs_so_far = 0.0
         self.realized_pnl_so_far = 0.0
         self.legs_opened_count = 0
+        self.used_stale_price = False
+        self.last_priced = {}
         for leg in legs:
-            self._record_entry_leg(leg)
+            self._record_entry_leg(leg, now_ist.date())
         self.entry_premium = sum(l.price for l in legs if l.transaction_type == "SELL") - sum(
             l.price for l in legs if l.transaction_type == "BUY"
         )
         self.opened_at = now_ist
         self.today_run_count += 1
 
-    def close_all(self, ts: int) -> bool:
+    def close_all(self, ts: int, today: date) -> bool:
         """All-or-nothing: only actually closes anything if every
-        currently-open leg can be priced this tick, same as the live
-        engine's _close_open_run."""
+        currently-open leg can be priced (fresh or stale-fallback) this
+        tick, same all-or-nothing semantics as the live engine's
+        _close_open_run."""
         open_legs = currently_open_legs(self.legs, self.leg_state)
-        if any(self.ds.quote_for(l["security_id"], ts) is None for l in open_legs):
+        if any(self._resolve_price(ts, today, l["security_id"]) is None for l in open_legs):
             return False
         for leg_data in open_legs:
-            self._close_leg(ts, leg_data)
+            self._close_leg(ts, today, leg_data)
         return True
 
-    def apply_leg_exits(self, ts: int, decision: dict[str, Any]) -> None:
+    def apply_leg_exits(self, ts: int, today: date, decision: dict[str, Any]) -> None:
         close_ids = {str(sid) for sid in (decision.get("close_security_ids") or [])}
         to_close = [l for l in currently_open_legs(self.legs, self.leg_state) if str(l["security_id"]) in close_ids]
-        if to_close and any(self.ds.quote_for(l["security_id"], ts) is None for l in to_close):
+        if to_close and any(self._resolve_price(ts, today, l["security_id"]) is None for l in to_close):
             return  # can't price every named leg this pass -- skip, retry next tick
         for leg_data in to_close:
-            self._close_leg(ts, leg_data)
+            self._close_leg(ts, today, leg_data)
         for sid, patch_ in (decision.get("leg_state_patch") or {}).items():
             sid = str(sid)
             self.leg_state[sid] = {**(self.leg_state.get(sid) or {"status": "open"}), **patch_}
 
-    def apply_rolls(self, ts: int, decision: dict[str, Any]) -> None:
+    def apply_rolls(self, ts: int, today: date, decision: dict[str, Any]) -> None:
         """`decision` is `{"rolls": [roll, ...]}` -- a strategy can name
         more than one independent roll in a single pass (e.g. Iron Condor
         Rolling adjusting both sides at once); each is applied in order,
@@ -187,12 +242,12 @@ class _Runner:
         for roll in decision.get("rolls") or []:
             close_ids = {str(sid) for sid in (roll.get("close_security_ids") or [])}
             to_close = [l for l in currently_open_legs(self.legs, self.leg_state) if str(l["security_id"]) in close_ids]
-            if close_ids and (len(to_close) != len(close_ids) or any(self.ds.quote_for(l["security_id"], ts) is None for l in to_close)):
+            if close_ids and (len(to_close) != len(close_ids) or any(self._resolve_price(ts, today, l["security_id"]) is None for l in to_close)):
                 continue  # a named leg isn't open, or can't be priced -- don't guess, skip just this roll
             for leg_data in to_close:
-                self._close_leg(ts, leg_data)
+                self._close_leg(ts, today, leg_data)
             for new_leg in roll.get("new_legs") or []:
-                self._record_entry_leg(new_leg)
+                self._record_entry_leg(new_leg, today)
             for sid, patch_ in (roll.get("leg_state_patch") or {}).items():
                 sid = str(sid)
                 self.leg_state[sid] = {**(self.leg_state.get(sid) or {"status": "open"}), **patch_}
@@ -208,6 +263,7 @@ class _Runner:
             opened_at=self.opened_at, closed_at=closed_at, reason=reason,
             realized_pnl=self.realized_pnl_so_far - self.total_costs_so_far,
             costs=self.total_costs_so_far, legs_opened=self.legs_opened_count,
+            used_stale_price=self.used_stale_price,
         )
         self.opened_at = None
         return trade
@@ -228,18 +284,18 @@ def _tick(runner: _Runner, ts: int, now_ist: datetime, impl: Strategy, params: d
         ctx = StrategyContext(dhan_client=None, params=params)
         notes = runner.notes()
         if impl.evaluate_exit(ctx, notes):
-            if runner.close_all(ts):
+            if runner.close_all(ts, today):
                 result.trades.append(runner.finish(now_ist, "evaluate_exit"))
         else:
             leg_decision = impl.evaluate_leg_exits(ctx, notes)
             if leg_decision:
-                runner.apply_leg_exits(ts, leg_decision)
+                runner.apply_leg_exits(ts, today, leg_decision)
                 if runner.is_fully_closed():
                     result.trades.append(runner.finish(now_ist, "evaluate_leg_exits"))
             if runner.is_open:
                 roll_decision = impl.evaluate_rolls(ctx, runner.notes())
                 if roll_decision:
-                    runner.apply_rolls(ts, roll_decision)
+                    runner.apply_rolls(ts, today, roll_decision)
 
     realized_so_far = sum(t.realized_pnl for t in result.trades)
     unrealized = 0.0
@@ -247,6 +303,7 @@ def _tick(runner: _Runner, ts: int, now_ist: datetime, impl: Strategy, params: d
         for leg in currently_open_legs(runner.legs, runner.leg_state):
             price = runner.ds.quote_for(leg["security_id"], ts)
             if price is not None:
+                runner.note_price(str(leg["security_id"]), price, today)  # feeds the stale-close fallback
                 unrealized += leg_pnl(leg, price)
     result.equity_curve.append((now_ist, realized_so_far + unrealized))
 
@@ -273,6 +330,7 @@ def run_backtest(
     cost_model: CostModel | None = None,
     auto_advance_expiry: bool = False,
     expiry_weekday: int = DEFAULT_EXPIRY_WEEKDAY,
+    stale_close_days: int = 5,
 ) -> BacktestResult:
     """Replay `strategy_cls` (with `params`) against the local historical
     cache for `underlying`, from `start` to `end` (inclusive), at the
@@ -280,6 +338,13 @@ def run_backtest(
     an equity curve. Raises ValueError if there's no downloaded data at
     all in that range -- a setup problem the caller should see, not
     silently produce an empty result for.
+
+    `stale_close_days`: a leg unpriceable for this many days straight
+    (drifted outside the downloaded strike band and stayed there) is
+    force-closed at its last known price instead of blocking every close
+    mechanism (expiry-day close, stop-loss, target) indefinitely -- see
+    `_Runner._resolve_price`. Trade.used_stale_price flags any trade this
+    affected; treat those as approximations, not final numbers.
 
     `auto_advance_expiry`: for a strategy that holds against a *fixed,
     configured* expiry and refuses to ever enter again once it's passed
@@ -333,7 +398,7 @@ def run_backtest(
 
     result = BacktestResult(underlying=underlying.upper())
     impl = strategy_cls()
-    runner = _Runner(ds, cost_model)
+    runner = _Runner(ds, cost_model, stale_close_days=stale_close_days)
 
     expiries = weekly_expiries(start, end, expiry_weekday) if auto_advance_expiry else []
 

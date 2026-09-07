@@ -116,6 +116,57 @@ def test_no_data_raises_a_clear_error(tmp_path: Path):
         )
 
 
+def test_close_all_stays_blocked_before_stale_close_days_elapse(data_root: Path):
+    """A leg with no fresh price available shouldn't be force-closed on
+    the very first failed attempt -- only once it's been unpriceable for
+    a real stretch (stale_close_days). Strike 30000 has no downloaded
+    series at all in this fixture (unlike 25250/24750, which do) -- same
+    "drifted onto an offset nothing was ever downloaded for" scenario
+    found in the real Iron Fly Adjustments stuck-trade case (_asof
+    returns a series' last known value indefinitely once it exists, so
+    it's the *absence* of any series at all that makes a leg unpriceable,
+    not merely running past the end of one that does exist)."""
+    ds = HistoricalDataSource("NIFTY", data_root)
+    runner = _Runner(ds, CostModel(), stale_close_days=5)
+    entry_leg = OrderLeg(
+        label="SELL 30000 CE", security_id=ds.security_id_for(30000, "CE"), trading_symbol="NIFTY 30000 CE x",
+        exchange_segment="NSE_FNO", transaction_type="SELL", quantity=75, order_type="MARKET",
+        product_type="INTRADAY", price=60.0, role="primary",
+    )
+    runner.start_run(datetime(2024, 9, 4, 9, 20, tzinfo=IST), [entry_leg])
+
+    later_ts = int(datetime(2024, 9, 6, 9, 20, tzinfo=IST).timestamp())  # 2 days later, < stale_close_days
+    assert runner.close_all(later_ts, date(2024, 9, 6)) is False
+    assert runner.is_open is True
+
+
+def test_close_all_force_closes_at_last_known_price_once_stale(data_root: Path):
+    ds = HistoricalDataSource("NIFTY", data_root)
+    runner = _Runner(ds, CostModel(), stale_close_days=5)
+    entry_leg = OrderLeg(
+        label="SELL 30000 CE", security_id=ds.security_id_for(30000, "CE"), trading_symbol="NIFTY 30000 CE x",
+        exchange_segment="NSE_FNO", transaction_type="SELL", quantity=75, order_type="MARKET",
+        product_type="INTRADAY", price=60.0, role="primary",
+    )
+    runner.start_run(datetime(2024, 9, 4, 9, 20, tzinfo=IST), [entry_leg])
+
+    # 6 days after entry -- past stale_close_days=5, and this strike never
+    # had a fresh quote even once (no series at all for its offset).
+    stale_ts = int(datetime(2024, 9, 10, 9, 20, tzinfo=IST).timestamp())
+    closed_at = datetime(2024, 9, 10, 9, 20, tzinfo=IST)
+    result = runner.close_all(stale_ts, closed_at.date())
+
+    assert result is True
+    assert runner.used_stale_price is True
+    trade = runner.finish(closed_at, "evaluate_exit")
+    assert trade.used_stale_price is True
+    # Closed at the SAME last-known (entry fill) price, both sides only
+    # slippage-adjusted -- near zero before costs, so realized_pnl (net
+    # of costs) should land close to -costs, not some fabricated number
+    # far away from that.
+    assert trade.realized_pnl == pytest.approx(-trade.costs, abs=5)
+
+
 def test_apply_rolls_reads_the_nested_rolls_list(data_root: Path):
     """Regression: evaluate_rolls returns {"rolls": [roll, ...]} -- a list
     of independent roll operations, not a flat {"close_security_ids": ...}
@@ -146,7 +197,7 @@ def test_apply_rolls_reads_the_nested_rolls_list(data_root: Path):
     decision = {"rolls": [{"close_security_ids": [old_leg["security_id"]], "new_legs": [new_leg]}]}
 
     ts = int(datetime(2024, 9, 4, 9, 20, tzinfo=IST).timestamp())
-    runner.apply_rolls(ts, decision)
+    runner.apply_rolls(ts, date(2024, 9, 4), decision)
 
     assert runner.leg_state[old_leg["security_id"]]["status"] == "closed"
     assert len(runner.legs) == 2  # old (now closed) + the new one appended
