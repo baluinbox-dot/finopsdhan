@@ -77,19 +77,36 @@ def _load_strategy_or_redirect(db: DbSession, request: Request, strategy_id: uui
     return strategy, None
 
 
-def _resolve_base_params(db: DbSession, strategy: Strategy, current_user) -> dict:
-    """class defaults -> published strategy's own defaults -> the user's
-    existing configured instance for it, if any -- same precedence every
-    configure-form route in app.routers.strategies already uses, so a
-    backtest defaults to "what I'd actually enter live" rather than a
-    generic placeholder."""
+def _resolve_instance(db: DbSession, strategy: Strategy, current_user, user_strategy_id: str) -> UserStrategy | None:
+    """The specific instance named by user_strategy_id, if it's valid and
+    owned by this user -- or, when none was named, an arbitrary one of this
+    user's instances of this strategy (a user can run several concurrently,
+    e.g. a CE seller and a PE seller, so "arbitrary" is a real ambiguity;
+    always pass user_strategy_id when the caller knows which one it means,
+    e.g. arriving from that instance's own "Save & Backtest" button)."""
+    if user_strategy_id:
+        try:
+            existing = db.get(UserStrategy, uuid.UUID(user_strategy_id))
+        except ValueError:
+            existing = None
+        if existing is not None and existing.user_id == current_user.id and existing.strategy_id == strategy.id:
+            return existing
+        return None
+    return db.scalars(
+        select(UserStrategy).where(UserStrategy.user_id == current_user.id, UserStrategy.strategy_id == strategy.id)
+    ).first()
+
+
+def _resolve_base_params(db: DbSession, strategy: Strategy, current_user, user_strategy_id: str = "") -> dict:
+    """class defaults -> published strategy's own defaults -> the resolved
+    instance's params, if any -- same precedence every configure-form route
+    in app.routers.strategies already uses, so a backtest defaults to
+    "what I'd actually enter live" rather than a generic placeholder."""
     try:
         class_defaults = get_strategy_class(strategy.code_ref).default_params
     except ValueError:
         class_defaults = {}
-    existing = db.scalars(
-        select(UserStrategy).where(UserStrategy.user_id == current_user.id, UserStrategy.strategy_id == strategy.id)
-    ).first()
+    existing = _resolve_instance(db, strategy, current_user, user_strategy_id)
     return {**class_defaults, **strategy.default_params, **(existing.params if existing else {})}
 
 
@@ -117,12 +134,18 @@ def _reap_stale_runs(db: DbSession) -> None:
 
 
 @router.get("/{strategy_id}")
-def backtest_form(request: Request, db: DbSession, current_user: CurrentUser, strategy_id: uuid.UUID):
+def backtest_form(
+    request: Request, db: DbSession, current_user: CurrentUser, strategy_id: uuid.UUID, user_strategy_id: str = "",
+):
     strategy, redirect = _load_strategy_or_redirect(db, request, strategy_id)
     if redirect:
         return redirect
 
-    base_params = _resolve_base_params(db, strategy, current_user)
+    instance = _resolve_instance(db, strategy, current_user, user_strategy_id)
+    if user_strategy_id and instance is None:
+        flash(request, "Strategy instance not found.", "error")
+        return RedirectResponse(url(f"/backtest/{strategy_id}"), status_code=303)
+    base_params = _resolve_base_params(db, strategy, current_user, user_strategy_id)
 
     _reap_stale_runs(db)
     lock_row = _active_lock_row(db)
@@ -138,6 +161,8 @@ def backtest_form(request: Request, db: DbSession, current_user: CurrentUser, st
         {
             "current_user": current_user,
             "strategy": strategy,
+            "instance": instance,
+            "user_strategy_id": str(instance.id) if instance else "",
             "underlyings": UNDERLYING_CHOICES,
             "selected_underlying": (base_params.get("underlying") or "NIFTY").upper(),
             "selected_lots": int(base_params.get("lots") or 1),
@@ -159,12 +184,16 @@ def backtest_submit(
     start_date: date = Form(...),
     end_date: date = Form(...),
     lots: int = Form(1),
+    user_strategy_id: str = Form(""),
 ):
     strategy, redirect = _load_strategy_or_redirect(db, request, strategy_id)
     if redirect:
         return redirect
 
-    back = RedirectResponse(url(f"/backtest/{strategy_id}"), status_code=303)
+    back_url = f"/backtest/{strategy_id}"
+    if user_strategy_id:
+        back_url += f"?user_strategy_id={user_strategy_id}"
+    back = RedirectResponse(url(back_url), status_code=303)
     underlying = underlying.upper()
     if underlying not in UNDERLYING_CHOICES:
         flash(request, "Unknown underlying.", "error")
@@ -204,7 +233,7 @@ def backtest_submit(
             flash(request, f"Please wait {wait_minutes} more minute(s) before starting another backtest.", "error")
             return back
 
-    params = _resolve_base_params(db, strategy, current_user)
+    params = _resolve_base_params(db, strategy, current_user, user_strategy_id)
     params["underlying"] = underlying
     params["lots"] = lots
 
