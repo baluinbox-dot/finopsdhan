@@ -159,6 +159,14 @@ class StrategyContext:
     # instance (open or closed). Lets a strategy implement its own daily
     # entry cap (e.g. one-shot-per-day) without engine-wide hardcoding.
     today_run_count: int = 0
+    # Same idea as today_run_count, but counting since this week's Monday
+    # 00:00 IST — for a strategy that holds across days and should stay
+    # flat for the rest of the *week* after a stop, not just the rest of
+    # the day (see app.strategies.rsi_call_writing, the first to use this).
+    # Both counts are populated the same way (every run counts, however it
+    # ended) and both are bypassed the same way by enter_user_strategy_now's
+    # manual override — see app.engine.runner.
+    week_run_count: int = 0
 
 
 class Strategy(ABC):

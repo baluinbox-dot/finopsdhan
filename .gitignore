@@ -32,3 +32,7 @@ logs/
 # Downloaded/cached data (e.g. dhanhq's security master CSV)
 security_id_list.csv
 *.csv
+
+# Local historical-data cache for backtesting (see scripts/backtest/) --
+# bulk timeseries data, never belongs in git history
+data/

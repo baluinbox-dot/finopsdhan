@@ -111,6 +111,18 @@ def _today_run_count(user_strategy: UserStrategy) -> int:
     return sum(1 for run in user_strategy.runs if run.started_at.astimezone(IST).date() == today_ist)
 
 
+def _week_run_count(user_strategy: UserStrategy) -> int:
+    """Same idea as `_today_run_count`, counting since this week's Monday
+    00:00 IST instead of just today — for a strategy that holds across days
+    and should stay flat for the rest of the *week* after a stop (see
+    app.strategies.rsi_call_writing). Every run counts, however it ended;
+    `enter_user_strategy_now` bypasses this the same deliberate way it
+    bypasses the daily count."""
+    now_ist = datetime.now(IST)
+    monday = (now_ist - timedelta(days=now_ist.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+    return sum(1 for run in user_strategy.runs if run.started_at.astimezone(IST) >= monday)
+
+
 def _opposite(transaction_type: str) -> str:
     return "BUY" if transaction_type == "SELL" else "SELL"
 
@@ -591,6 +603,7 @@ def run_user_strategy(db: Session, user_strategy: UserStrategy) -> None:
             dhan_client=user_dhan.client,
             params=entry_params,
             today_run_count=_today_run_count(user_strategy),
+            week_run_count=_week_run_count(user_strategy),
         )
 
         legs = impl.evaluate_entry(entry_ctx)
@@ -648,8 +661,9 @@ def enter_user_strategy_now(db: Session, user_strategy: UserStrategy) -> bool:
     cycle — the "Enter Now" button's action. Runs the exact same
     `evaluate_entry` logic the scheduler uses (still requires the
     strategy's real trigger conditions to actually be met — this is not a
-    blind market order), but deliberately passes `today_run_count=0`,
-    ignoring how many times this instance has already traded today.
+    blind market order), but deliberately passes `today_run_count=0` and
+    `week_run_count=0`, ignoring how many times this instance has already
+    traded today or this week.
 
     That's a deliberate override: once a position closes (automatically
     *or* manually), the scheduler will not re-enter this instance again on
@@ -676,7 +690,7 @@ def enter_user_strategy_now(db: Session, user_strategy: UserStrategy) -> bool:
     impl = strategy_cls()
 
     entry_params = {**strategy.default_params, **user_strategy.params}
-    entry_ctx = StrategyContext(dhan_client=user_dhan.client, params=entry_params, today_run_count=0)
+    entry_ctx = StrategyContext(dhan_client=user_dhan.client, params=entry_params, today_run_count=0, week_run_count=0)
 
     legs = impl.evaluate_entry(entry_ctx)
     if not legs:

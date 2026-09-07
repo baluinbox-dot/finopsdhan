@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from datetime import date, timedelta
 from typing import Any, Callable
 
 import pandas as pd
@@ -73,6 +74,19 @@ _QUOTE_MIN_INTERVAL_SECONDS = 1.0
 # actual SL/target/roll checks depend on.
 _margin_state: dict[str, dict[str, Any]] = {}
 _MARGIN_MIN_INTERVAL_SECONDS = 1.0
+
+# Historical daily-candle data (/charts/historical), used by
+# fetch_daily_closes below to compute technical indicators (e.g. RSI) on
+# the underlying's own daily closes — the first thing in this app to call
+# a historical-data endpoint rather than a live spot/quote/chain one. No
+# documented per-second limit found for this family either (confirmed
+# empirically to belong to Dhan's separate "Data APIs" category, not
+# Quote APIs); same conservative 1/sec baseline + backoff as margin above,
+# called at most once/day per strategy instance so it's in no danger of
+# competing with the quote/option-chain budget every SL/target/roll check
+# actually depends on.
+_historical_state: dict[str, dict[str, Any]] = {}
+_HISTORICAL_MIN_INTERVAL_SECONDS = 1.0
 
 # Meta-lock guarding creation of a new per-account entry in the throttle
 # dicts above (not the per-account throttling itself — that's each entry's
@@ -391,6 +405,45 @@ def fetch_expiry_list(dhan_client: "dhanhq", under_security_id: int, under_excha
     )
     data = _unwrap_nested(unwrap_sdk_data(response))
     return data or []
+
+
+def fetch_daily_closes(
+    dhan_client: "dhanhq", security_id: int, exchange_segment: str, *, lookback_days: int = 90,
+) -> list[float]:
+    """Daily closing prices for a raw security_id/segment pair, oldest
+    first, over the trading days in the last `lookback_days` calendar days
+    (asking for more calendar days than needed just means a few unused
+    weekend/holiday gaps in the request window — Dhan only ever returns
+    real trading-day candles). Used by a strategy that needs a technical
+    indicator (e.g. RSI) computed on the underlying's own daily closes —
+    see app.strategies.rsi_call_writing, the first strategy in this app to
+    need historical (rather than live) data.
+
+    Confirmed against the real v2 API (not just the SDK docstring, which
+    is unreliable elsewhere in this module too): the response is a single
+    envelope, `response["data"]["close"]` directly — unlike option_chain/
+    expiry_list/quote_data/ticker_data, this one is NOT double-wrapped.
+
+    Returns [] (never raises) on any failure — same "not available this
+    pass, not an error" convention as fetch_combined_margin."""
+    to_date = date.today()
+    from_date = to_date - timedelta(days=lookback_days)
+    try:
+        response = _throttled_call(
+            _historical_state, dhan_client, _HISTORICAL_MIN_INTERVAL_SECONDS,
+            lambda: _call_with_retry(lambda: dhan_client.historical_daily_data(
+                security_id=security_id, exchange_segment=exchange_segment, instrument_type="INDEX",
+                from_date=from_date.isoformat(), to_date=to_date.isoformat(),
+            )),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("historical_daily_data call raised: %s: %s", type(exc).__name__, exc)
+        return []
+    if response.get("status") != "success":
+        logger.warning("historical_daily_data call failed: %s", format_dhan_error(response.get("remarks")))
+        return []
+    closes = (response.get("data") or {}).get("close") or []
+    return [float(c) for c in closes]
 
 
 def list_expiries(dhan_client: "dhanhq", underlying: str) -> list[str]:

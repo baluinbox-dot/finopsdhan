@@ -15,11 +15,12 @@ from sqlalchemy import select
 
 from app.config import get_settings
 from app.dhan.client import DhanNotConnectedError, get_user_dhan_client
-from app.dhan.helpers import UNDERLYINGS, fetch_chain_df, get_lot_size, list_expiries
+from app.dhan.helpers import UNDERLYINGS, fetch_chain_df, fetch_daily_closes, get_lot_size, list_expiries
 from app.deps import CurrentUser, DbSession, SuperadminUser
 from app.engine.runner import close_user_strategy_now, enter_user_strategy_now, find_open_run
 from app.models import Strategy, StrategyMode, UserStrategy
 from app.strategies.registry import RICH_CONFIG_STRATEGIES, STRATEGY_REGISTRY, get_strategy_class
+from app.strategies.rsi_call_writing import _resolve_target_expiry, _rsi_today_and_yesterday
 from app.templating import flash, render, url
 
 router = APIRouter(prefix="/strategies", tags=["strategies"])
@@ -1809,6 +1810,191 @@ def configure_dynamic_strangle_submit(
             return RedirectResponse(url("/strategies"), status_code=303)
 
     final_label = label.strip() or f"Dynamic Strangle {params['underlying']}"
+
+    if existing:
+        existing.label = final_label
+        existing.params = params
+        existing.mode = requested_mode
+        existing.is_active = True
+    else:
+        db.add(
+            UserStrategy(
+                user_id=current_user.id,
+                strategy_id=strategy_id,
+                label=final_label,
+                params=params,
+                mode=requested_mode,
+                is_active=True,
+            )
+        )
+    db.commit()
+
+    flash(request, f"{final_label} configured and enabled in {requested_mode.value} mode.", "success")
+    return RedirectResponse(url("/strategies"), status_code=303)
+
+
+@router.get("/{strategy_id}/configure-rsi-call-writing")
+def configure_rsi_call_writing_form(
+    request: Request,
+    db: DbSession,
+    current_user: CurrentUser,
+    strategy_id: uuid.UUID,
+    user_strategy_id: str = "",
+    underlying: str = "",
+):
+    strategy = db.get(Strategy, strategy_id)
+    if strategy is None or not strategy.is_published:
+        flash(request, "Strategy not found.", "error")
+        return RedirectResponse(url("/strategies"), status_code=303)
+
+    existing: UserStrategy | None = None
+    if user_strategy_id:
+        try:
+            existing = db.get(UserStrategy, uuid.UUID(user_strategy_id))
+        except ValueError:
+            existing = None
+        if existing is None or existing.user_id != current_user.id or existing.strategy_id != strategy_id:
+            flash(request, "Strategy instance not found.", "error")
+            return RedirectResponse(url("/strategies"), status_code=303)
+
+    existing_params = existing.params if existing else {}
+    underlying = (underlying or existing_params.get("underlying") or "NIFTY").upper()
+    if underlying not in UNDERLYINGS:
+        underlying = "NIFTY"
+
+    has_dhan = current_user.dhan_credential is not None and current_user.dhan_credential.is_active
+
+    try:
+        strategy_cls = get_strategy_class(strategy.code_ref)
+        class_defaults = strategy_cls.default_params
+    except ValueError:
+        class_defaults = {}
+    params = {**class_defaults, **strategy.default_params, **existing_params}
+    params["underlying"] = underlying
+
+    preview: dict | None = None
+    preview_error: str | None = None
+
+    if has_dhan:
+        try:
+            user_dhan = get_user_dhan_client(db, current_user)
+            meta = UNDERLYINGS[underlying]
+            closes = fetch_daily_closes(user_dhan.client, meta["security_id"], meta["exchange_segment"])
+            rsi_period = int(params.get("rsi_period") or 3)
+            rsi_yesterday, rsi_today = _rsi_today_and_yesterday(closes, rsi_period)
+
+            all_expiries = list_expiries(user_dhan.client, underlying)
+            target_expiry = _resolve_target_expiry(all_expiries, date.today())
+
+            strike = None
+            spot = None
+            if target_expiry:
+                chain_df, spot = fetch_chain_df(
+                    user_dhan.client, under_security_id=meta["security_id"],
+                    expiry=target_expiry, under_exchange_segment=meta["exchange_segment"],
+                )
+                if not chain_df.empty:
+                    strikes = sorted(chain_df["strike"].tolist())
+                    offset_pct = float(params.get("strike_offset_pct") or 1.0)
+                    strike = min(strikes, key=lambda x: abs(x - spot * (1 + offset_pct / 100)))
+
+            cross_level = float(params.get("rsi_cross_level") or 70)
+            crossed_down_today = (
+                rsi_yesterday is not None and rsi_today is not None
+                and rsi_yesterday >= cross_level and rsi_today < cross_level
+            )
+            preview = {
+                "rsi_yesterday": rsi_yesterday, "rsi_today": rsi_today, "crossed_down_today": crossed_down_today,
+                "target_expiry": target_expiry, "spot": spot, "strike": strike, "closes_count": len(closes),
+            }
+        except Exception as exc:  # noqa: BLE001 -- preview is a nice-to-have, never block the form
+            preview_error = f"Could not build a live preview: {exc}"
+
+    return render(
+        request,
+        "strategies/configure_rsi_call_writing.html",
+        {
+            "current_user": current_user,
+            "user_strategy_id": user_strategy_id,
+            "strategy": strategy,
+            "has_dhan": has_dhan,
+            "underlyings": UNDERLYINGS,
+            "selected_underlying": underlying,
+            "preview": preview,
+            "preview_error": preview_error,
+            "params": params,
+            "existing": existing,
+        },
+    )
+
+
+@router.post("/{strategy_id}/configure-rsi-call-writing")
+def configure_rsi_call_writing_submit(
+    request: Request,
+    db: DbSession,
+    current_user: CurrentUser,
+    strategy_id: uuid.UUID,
+    user_strategy_id: str = Form(""),
+    label: str = Form(""),
+    underlying: str = Form(...),
+    lots: int = Form(1),
+    entry_check_time: str = Form("15:25"),
+    rsi_period: int = Form(3),
+    rsi_cross_level: float = Form(70),
+    strike_offset_pct: float = Form(1.0),
+    stop_loss_pct: float = Form(50),
+    profit_lock_trigger_pct: float = Form(35),
+    profit_lock_stop_pct: float = Form(85),
+    order_type: str = Form("LIMIT"),
+    live_confirmed: bool = Form(False),
+    mode: str = Form("paper"),
+):
+    strategy = db.get(Strategy, strategy_id)
+    if strategy is None or not strategy.is_published:
+        flash(request, "Strategy not found.", "error")
+        return RedirectResponse(url("/strategies"), status_code=303)
+
+    if not current_user.dhan_credential or not current_user.dhan_credential.is_active:
+        flash(request, "Connect your Dhan account on the Settings page before enabling a strategy.", "error")
+        return RedirectResponse(url("/strategies"), status_code=303)
+
+    if underlying.upper() not in UNDERLYINGS:
+        flash(request, "Unknown underlying.", "error")
+        return RedirectResponse(url(f"/strategies/{strategy_id}/configure-rsi-call-writing"), status_code=303)
+
+    if rsi_period <= 0 or strike_offset_pct <= 0:
+        flash(request, "RSI Period and Strike Offset must both be greater than zero.", "error")
+        redirect_url = f"/strategies/{strategy_id}/configure-rsi-call-writing?underlying={underlying}"
+        if user_strategy_id:
+            redirect_url += f"&user_strategy_id={user_strategy_id}"
+        return RedirectResponse(url(redirect_url), status_code=303)
+
+    requested_mode = _resolve_requested_mode(request, mode, live_confirmed)
+
+    params = {
+        "underlying": underlying.upper(),
+        "lots": lots,
+        "entry_check_time": entry_check_time,
+        "rsi_period": rsi_period,
+        "rsi_cross_level": rsi_cross_level,
+        "strike_offset_pct": strike_offset_pct,
+        "stop_loss_pct": stop_loss_pct,
+        "profit_lock_trigger_pct": profit_lock_trigger_pct,
+        "profit_lock_stop_pct": profit_lock_stop_pct,
+        "order_type": "MARKET" if order_type == "MARKET" else "LIMIT",
+    }
+
+    existing: UserStrategy | None = None
+    if user_strategy_id:
+        try:
+            existing = db.get(UserStrategy, uuid.UUID(user_strategy_id))
+        except ValueError:
+            existing = None
+        if existing is None or existing.user_id != current_user.id or existing.strategy_id != strategy_id:
+            flash(request, "Strategy instance not found.", "error")
+            return RedirectResponse(url("/strategies"), status_code=303)
+
+    final_label = label.strip() or f"RSI Call Writing {params['underlying']}"
 
     if existing:
         existing.label = final_label

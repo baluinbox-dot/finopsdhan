@@ -13,6 +13,7 @@ from app.strategies.dynamic_strangle import DynamicStrangleStrategy
 from app.strategies.example_short_strangle import ExampleShortStrangle
 from app.strategies.iron_condor_rolling import IronCondorRollingStrategy
 from app.strategies.iron_fly_adjustments import IronFlyAdjustmentsStrategy
+from app.strategies.rsi_call_writing import RSICallWritingStrategy
 from app.strategies.single_leg_seller_hedge import SingleLegSellerWithHedge
 from app.strategies.three_pair_rolling import ThreePairRollingStrategy
 from app.strategies.three_pair_rolling_leg_sl_target import ThreePairRollingLegSLTargetStrategy
@@ -26,6 +27,7 @@ STRATEGY_REGISTRY: dict[str, type[Strategy]] = {
     "iron_condor_rolling": IronCondorRollingStrategy,
     "iron_fly_adjustments": IronFlyAdjustmentsStrategy,
     "dynamic_strangle": DynamicStrangleStrategy,
+    "rsi_call_writing": RSICallWritingStrategy,
 }
 
 # code_refs whose configuration is rich enough to need a dedicated
@@ -40,6 +42,7 @@ RICH_CONFIG_STRATEGIES: set[str] = {
     "iron_condor_rolling",
     "iron_fly_adjustments",
     "dynamic_strangle",
+    "rsi_call_writing",
 }
 
 
