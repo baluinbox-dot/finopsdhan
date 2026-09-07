@@ -2,7 +2,7 @@
 
 Pulls, for each configured underlying (NIFTY / BANKNIFTY / SENSEX):
   - Spot 5-min candles (`intraday_minute_data`) over the full date range.
-  - ATM-15..ATM+15 option premium candles (`expired_options_data`), CE and
+  - ATM-30..ATM+30 option premium candles (`expired_options_data`), CE and
     PE separately, weekly expiry only (`expiry_flag="WEEK"`, `expiry_code=1`
     -- confirmed empirically to mean "the nearest weekly contract as of
     each moment in the range," not a single contract pinned to today).
@@ -72,13 +72,18 @@ _CHUNK_DAYS = 40
 # ever move forward on a later run.
 _BACKFILL_START = date(2024, 9, 4)
 
-# ATM itself (0) plus 15 strikes either side -- covers every strategy
-# instance configured on finopsdhan as of 2026-09-04 with real headroom
-# (e.g. NIFTY Dynamic Strangle base=500pts/50pt strikes = ATM+-10). A
-# strategy configured with a much wider distance later (e.g. a BANKNIFTY
-# strangle beyond ATM+-15) would need this range widened and a re-run --
-# safe to do since re-running only fetches the newly-added offsets.
-_STRIKE_OFFSETS = list(range(-15, 16))
+# ATM itself (0) plus 30 strikes either side. Widened from the original
+# +-15 (2026-09-07) after real backtests of long-holding strategies
+# (Iron Fly Adjustments, which resets/adjusts less often and holds for
+# up to a full weekly cycle) showed an 11.5% stuck-trade rate -- a leg
+# drifting far enough that its strike fell entirely outside +-15 before
+# the position could next adjust/reset/close, becoming permanently
+# unpriceable for the rest of that backtest. +-30 isn't a guarantee
+# against every possible move either, just a documented, wider margin --
+# re-running after any further widening only fetches the newly-added
+# offsets, same as this widening only added -30..-16 and 16..30 (the
+# original +-15 data was already on disk and got skipped).
+_STRIKE_OFFSETS = list(range(-30, 31))
 
 DATA_ROOT = Path(__file__).resolve().parents[2] / "data" / "backtest"
 
