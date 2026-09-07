@@ -38,6 +38,7 @@ import pandas as pd
 
 from app.backtest.costs import CostModel
 from app.backtest.data_source import DEFAULT_LOT_SIZE, HistoricalDataSource
+from app.backtest.expiry_calendar import DEFAULT_EXPIRY_WEEKDAY, next_expiry_on_or_after, weekly_expiries
 from app.strategies.base import OrderLeg, Strategy, StrategyContext, currently_open_legs, leg_pnl
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -270,13 +271,26 @@ def run_backtest(
     end: date,
     data_root: Path | str,
     cost_model: CostModel | None = None,
+    auto_advance_expiry: bool = False,
+    expiry_weekday: int = DEFAULT_EXPIRY_WEEKDAY,
 ) -> BacktestResult:
     """Replay `strategy_cls` (with `params`) against the local historical
     cache for `underlying`, from `start` to `end` (inclusive), at the
     data's own 5-minute granularity. Returns every completed trade plus
     an equity curve. Raises ValueError if there's no downloaded data at
     all in that range -- a setup problem the caller should see, not
-    silently produce an empty result for."""
+    silently produce an empty result for.
+
+    `auto_advance_expiry`: for a strategy that holds against a *fixed,
+    configured* expiry and refuses to ever enter again once it's passed
+    (Iron Condor Rolling, Iron Fly Adjustments -- in real use, you
+    reconfigure the instance with a new expiry by hand each cycle).
+    When enabled, `params["expiry"]` is advanced to the next synthetic
+    weekly expiry (see app.backtest.expiry_calendar) the moment the
+    current one goes stale while the run is flat -- simulating perfect,
+    on-time reconfiguration every cycle. Strategies that never look at
+    `expiry` as a real date (Dynamic Strangle, 3-Pair Rolling, etc.)
+    should leave this off; a placeholder string works fine for them."""
     ds = HistoricalDataSource(underlying, data_root)
     cost_model = cost_model or CostModel()
     lot_size = DEFAULT_LOT_SIZE.get(underlying.upper(), 75) * lots
@@ -321,6 +335,8 @@ def run_backtest(
     impl = strategy_cls()
     runner = _Runner(ds, cost_model)
 
+    expiries = weekly_expiries(start, end, expiry_weekday) if auto_advance_expiry else []
+
     for p in patchers:
         p.start()
     try:
@@ -328,8 +344,29 @@ def run_backtest(
             current_ts[0] = ts
             current_now[0] = datetime.fromtimestamp(ts, tz=IST)
             _tick(runner, ts, current_now[0], impl, params, result)
+            if auto_advance_expiry and not runner.is_open:
+                _advance_expiry_if_stale(params, expiries, current_now[0].date())
     finally:
         for p in patchers:
             p.stop()
 
     return result
+
+
+def _advance_expiry_if_stale(params: dict[str, Any], expiries: list[str], today: date) -> None:
+    """Mutates params["expiry"] in place to the next synthetic weekly
+    expiry on or after `today`, but only when the currently-configured
+    one has actually gone stale (< today) -- a still-valid expiry (e.g.
+    right after an early stop-loss close mid-cycle) is left untouched, so
+    the strategy naturally re-enters against the *same* expiry exactly
+    like a real user would without needing to reconfigure anything."""
+    current = params.get("expiry")
+    try:
+        current_date = date.fromisoformat(current) if current else None
+    except ValueError:
+        current_date = None
+    if current_date is not None and current_date >= today:
+        return  # still valid -- don't touch it
+    fresh = next_expiry_on_or_after(expiries, today)
+    if fresh is not None:
+        params["expiry"] = fresh
