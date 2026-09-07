@@ -1,0 +1,158 @@
+{% extends "base.html" %}
+{% block title %}Configure {{ strategy.name }} — FinOps Algo{% endblock %}
+{% block content %}
+<h4 class="mb-1">{{ 'Reconfigure: ' ~ (existing.label or strategy.name) if existing else 'Add New Instance: ' ~ strategy.name }}</h4>
+<p class="text-body-secondary">{{ strategy.description }}</p>
+{% if not existing %}
+<p class="small text-body-secondary">
+    This creates a <strong>new, independent instance</strong> — any other instances of this strategy you already have
+    running keep running untouched.
+</p>
+{% endif %}
+
+{% if not has_dhan %}
+<div class="alert alert-warning">
+    Connect your Dhan account on the <a href="{{ url('/settings/dhan') }}">Settings page</a> before configuring this strategy —
+    the live RSI/strike preview below is fetched from your own Dhan connection.
+</div>
+{% else %}
+
+<div class="card stat-card mb-3" style="max-width: 720px;">
+    <div class="card-body">
+        <form method="get" action="{{ url('/strategies/' ~ strategy.id ~ '/configure-rsi-call-writing') }}" class="row g-2 align-items-end">
+            <input type="hidden" name="user_strategy_id" value="{{ user_strategy_id }}">
+            <div class="col-auto">
+                <label class="form-label small mb-0">Underlying</label>
+                <select name="underlying" class="form-select form-select-sm" onchange="this.form.submit()">
+                    {% for key, meta in underlyings.items() %}
+                    <option value="{{ key }}" {{ 'selected' if key == selected_underlying else '' }}>{{ meta.label }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-auto">
+                <button class="btn btn-outline-secondary btn-sm" type="submit">Refresh Preview</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+{% if preview_error %}
+<div class="alert alert-danger">{{ preview_error }}</div>
+{% endif %}
+
+{% if preview %}
+<div class="alert alert-info">
+    Daily RSI: yesterday <strong>{{ '%.1f'|format(preview.rsi_yesterday) if preview.rsi_yesterday is not none else '—' }}</strong>,
+    today <strong>{{ '%.1f'|format(preview.rsi_today) if preview.rsi_today is not none else '—' }}</strong>
+    ({{ preview.closes_count }} daily closes fetched) —
+    {% if preview.crossed_down_today %}<strong class="text-success">crossed down through the level today</strong>
+    {% else %}no cross-down today{% endif %}.
+    {% if preview.target_expiry %}
+    Next entry/roll would target expiry <strong>{{ preview.target_expiry }}</strong>
+    {% if preview.strike %}at strike <strong>{{ preview.strike | int }}</strong> CE (spot {{ '%.2f'|format(preview.spot) }}){% endif %}.
+    {% else %}No valid upcoming expiry found.{% endif %}
+</div>
+{% endif %}
+
+<div class="card stat-card" style="max-width: 720px;">
+    <div class="card-body">
+        <form method="post" action="{{ url('/strategies/' ~ strategy.id ~ '/configure-rsi-call-writing') }}" class="row g-3">
+            <input type="hidden" name="user_strategy_id" value="{{ user_strategy_id }}">
+            <input type="hidden" name="underlying" value="{{ selected_underlying }}">
+
+            <div class="col-12">
+                <div class="small text-body-secondary mb-1">
+                    {{ underlyings[selected_underlying].label }} · RSI Call Writing · not intraday, rolls weekly at expiry
+                </div>
+            </div>
+
+            <div class="col-12">
+                <label class="form-label">Instance Name</label>
+                <input type="text" name="label" value="{{ existing.label if existing else '' }}" maxlength="120"
+                       class="form-control" placeholder="e.g. NIFTY RSI Call Writer — auto-generated if left blank">
+            </div>
+
+            <div class="col-md-4">
+                <label class="form-label">Lots</label>
+                <input type="number" name="lots" min="1" value="{{ params.lots }}" class="form-control">
+            </div>
+            <div class="col-md-4">
+                <label class="form-label">Entry Check Time</label>
+                <input type="time" name="entry_check_time" value="{{ params.entry_check_time }}" class="form-control">
+                <div class="form-text">Once/day — RSI + expiry-day roll are both evaluated here, near/after close.</div>
+            </div>
+            <div class="col-md-4">
+                <label class="form-label">Strike Offset (%)</label>
+                <input type="number" step="0.1" min="0.1" name="strike_offset_pct" value="{{ params.strike_offset_pct }}" class="form-control">
+                <div class="form-text">Strike = spot &times; (1 + this/100), nearest available strike.</div>
+            </div>
+
+            <div class="col-12"><hr></div>
+
+            <div class="col-md-4">
+                <label class="form-label">RSI Period</label>
+                <input type="number" min="1" name="rsi_period" value="{{ params.rsi_period }}" class="form-control">
+            </div>
+            <div class="col-md-4">
+                <label class="form-label">RSI Cross-Down Level</label>
+                <input type="number" step="1" name="rsi_cross_level" value="{{ params.rsi_cross_level }}" class="form-control">
+            </div>
+            <div class="col-12 small text-body-secondary">
+                Sells a call once/day (at the check time above) when daily RSI was &ge; this level yesterday and drops
+                below it today. RSI is never used as an exit — only entry. After a stop-loss or profit-lock exit, this
+                instance stays flat for the <strong>rest of that week</strong> (not just the rest of the day) — next
+                entry only comes from a fresh signal next week, or manually via Enter Now on the Dashboard.
+            </div>
+
+            <div class="col-12"><hr></div>
+
+            <div class="col-md-4">
+                <label class="form-label">Stop-Loss (%)</label>
+                <input type="number" step="1" name="stop_loss_pct" value="{{ params.stop_loss_pct }}" class="form-control">
+                <div class="form-text">Premium rising to entry &times; (1+this/100) closes the position.</div>
+            </div>
+            <div class="col-md-4">
+                <label class="form-label">Profit-Lock Trigger (%)</label>
+                <input type="number" step="1" name="profit_lock_trigger_pct" value="{{ params.profit_lock_trigger_pct }}" class="form-control">
+                <div class="form-text">Once premium decays this % from entry, the stop tightens (below).</div>
+            </div>
+            <div class="col-md-4">
+                <label class="form-label">Profit-Lock Stop (% of entry)</label>
+                <input type="number" step="1" name="profit_lock_stop_pct" value="{{ params.profit_lock_stop_pct }}" class="form-control">
+                <div class="form-text">New stop level once triggered — stays locked for the rest of this run.</div>
+            </div>
+
+            <div class="col-12"><hr></div>
+
+            <div class="col-12">
+                <label class="form-label">Order Type</label>
+                <select name="order_type" class="form-select">
+                    <option value="LIMIT" {{ 'selected' if params.order_type != 'MARKET' else '' }}>Limit (safe default — no fill if price moves away)</option>
+                    <option value="MARKET" {{ 'selected' if params.order_type == 'MARKET' else '' }}>Market (fills immediately, no price protection)</option>
+                </select>
+            </div>
+
+            <div class="col-12">
+                <label class="form-label">Mode</label>
+                <select name="mode" class="form-select">
+                    <option value="paper" selected>Paper (simulated)</option>
+                    <option value="live">Live</option>
+                </select>
+            </div>
+            <div class="col-12 form-check">
+                <input type="checkbox" class="form-check-input" id="liveConfirmed" name="live_confirmed" value="true">
+                <label class="form-check-label text-danger" for="liveConfirmed">
+                    I understand Live mode places real orders with real money on my connected Dhan account. Required to actually go live — otherwise this stays in Paper mode regardless of the Mode selected above.
+                </label>
+            </div>
+
+            <div class="col-12 mt-2">
+                <button id="configureSubmitBtn" class="btn btn-primary w-100" type="submit">
+                    {{ 'Update Configuration' if existing else 'Save and Enable' }}
+                </button>
+            </div>
+        </form>
+    </div>
+</div>
+{% endif %}
+{% endblock %}
