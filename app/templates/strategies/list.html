@@ -23,6 +23,10 @@
                 <h5 class="card-title">{{ s.name }}</h5>
                 <p class="card-text small text-body-secondary flex-grow-1">{{ s.description }}</p>
 
+                {% if s.code_ref in backtest_ready_strategies %}
+                <a href="{{ url('/backtest/' ~ s.id) }}" class="btn btn-outline-info btn-sm w-100 mb-2">📊 Backtest</a>
+                {% endif %}
+
                 {% if s.code_ref in rich_config_strategies %}
                     {# Rich-config strategies support multiple concurrent instances
                        (e.g. a CE seller and a PE seller both running at once). #}

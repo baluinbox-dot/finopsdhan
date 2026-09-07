@@ -68,6 +68,21 @@ class Settings(BaseSettings):
     # anywhere. Set back to true (or unset) once real TLS is in front of it.
     session_cookie_secure: bool | None = None
 
+    # --- In-app Backtest (Phase C) safeguards -- see app.routers.backtest ---
+    # Minimum gap between one user's backtest submissions. Not a real
+    # abuse concern with one operator, but cheap insurance against
+    # accidentally double-submitting a heavy request.
+    backtest_min_interval_minutes: int = 5
+    # A backtest_runs row stuck in queued/running past this long is
+    # treated as abandoned (its subprocess likely got SIGKILLed by the
+    # OS OOM-killer, which bypasses this app's own try/except entirely)
+    # and auto-failed so it stops holding the global one-at-a-time lock
+    # forever. Comfortably above how long even a full 2-year single-
+    # strategy run actually takes (seconds to low minutes, in-memory
+    # once the CSVs are loaded) without being so long a truly stuck lock
+    # sits unusable for hours.
+    backtest_stale_running_minutes: int = 30
+
     # --- Outbound email (verification links, password reset) ---
     # Empty smtp_host means "not configured" — app.email.send_email logs a
     # warning and no-ops rather than raising, so a missing/broken mail

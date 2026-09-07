@@ -1,0 +1,129 @@
+{% extends "base.html" %}
+{% block title %}Backtest Result — {{ strategy.name }} — FinOps Algo{% endblock %}
+{% block content %}
+{% if run.status in ('queued', 'running') %}
+<meta http-equiv="refresh" content="5">
+{% endif %}
+
+<h4 class="mb-1">Backtest: {{ strategy.name }}</h4>
+<p class="text-body-secondary small">
+    {{ run.underlying }} · {{ run.start_date }} → {{ run.end_date }} · {{ run.params.get('lots', 1) }} lot(s)
+    · submitted {{ (run.created_at | to_ist).strftime('%d %b, %H:%M') ~ ' IST' if run.created_at else '' }}
+</p>
+
+{% if run.status == 'queued' %}
+<div class="alert alert-secondary">
+    <strong>Queued</strong> — waiting for its turn (only one backtest runs at a time). This page refreshes automatically.
+</div>
+{% elif run.status == 'running' %}
+<div class="alert alert-primary">
+    <strong>Running</strong> since {{ (run.started_at | to_ist).strftime('%d %b, %H:%M') ~ ' IST' if run.started_at else '' }} — this page refreshes automatically.
+</div>
+{% elif run.status == 'failed' %}
+<div class="alert alert-danger">
+    <strong>Failed.</strong> {{ run.error_message }}
+</div>
+{% elif run.status == 'completed' %}
+{% set r = run.result or {} %}
+<div class="row g-3 mb-3">
+    <div class="col-6 col-md-3">
+        <div class="card stat-card h-100"><div class="card-body">
+            <div class="small text-body-secondary">Trades</div>
+            <div class="fs-4">{{ r.get('trade_count', 0) }}</div>
+        </div></div>
+    </div>
+    <div class="col-6 col-md-3">
+        <div class="card stat-card h-100"><div class="card-body">
+            <div class="small text-body-secondary">Total P&L</div>
+            <div class="fs-4 {{ 'text-success' if r.get('total_pnl', 0) >= 0 else 'text-danger' }}">₹{{ '{:,.0f}'.format(r.get('total_pnl', 0)) }}</div>
+        </div></div>
+    </div>
+    <div class="col-6 col-md-3">
+        <div class="card stat-card h-100"><div class="card-body">
+            <div class="small text-body-secondary">Win Rate</div>
+            <div class="fs-4">{{ '%.1f'|format(r.get('win_rate')) if r.get('win_rate') is not none else '—' }}%</div>
+        </div></div>
+    </div>
+    <div class="col-6 col-md-3">
+        <div class="card stat-card h-100"><div class="card-body">
+            <div class="small text-body-secondary">Max Drawdown</div>
+            <div class="fs-4">₹{{ '{:,.0f}'.format(r.get('max_drawdown', 0)) }}</div>
+        </div></div>
+    </div>
+</div>
+
+{% if r.get('stale_trade_count') %}
+<div class="alert alert-warning small">
+    {{ r.stale_trade_count }} trade(s) were force-closed at a last-known (stale) price rather than a fresh quote —
+    treat their P&L as an approximation, not a final number.
+</div>
+{% endif %}
+
+<div class="card stat-card mb-4">
+    <div class="card-body">
+        <canvas id="equityChart" height="90"></canvas>
+    </div>
+</div>
+
+<h5 class="mb-2">Trades ({{ r.get('trades', []) | length }})</h5>
+<div class="table-responsive">
+    <table class="table table-sm align-middle">
+        <thead>
+            <tr>
+                <th>Opened</th>
+                <th>Closed</th>
+                <th>Reason</th>
+                <th>Legs</th>
+                <th>P&L</th>
+                <th>Costs</th>
+                <th></th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for t in r.get('trades', []) %}
+            <tr>
+                <td>{{ t.opened_at[:10] }}</td>
+                <td>{{ t.closed_at[:10] }}</td>
+                <td class="small">{{ t.reason }}</td>
+                <td>{{ t.legs_opened }}</td>
+                <td class="{{ 'text-success' if t.realized_pnl >= 0 else 'text-danger' }}">₹{{ '{:,.0f}'.format(t.realized_pnl) }}</td>
+                <td class="small text-body-secondary">₹{{ '{:,.0f}'.format(t.costs) }}</td>
+                <td>{% if t.used_stale_price %}<span class="badge text-bg-warning" title="Closed at a stale price">stale</span>{% endif %}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
+
+<a href="{{ url('/backtest/' ~ strategy.id) }}" class="btn btn-link ps-0">← Back to Backtest</a>
+{% endblock %}
+
+{% block scripts %}
+{% if run.status == 'completed' %}
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<script>
+const equityCurve = {{ equity_curve_json | safe }};
+new Chart(document.getElementById('equityChart'), {
+    type: 'line',
+    data: {
+        labels: equityCurve.map(p => p[0].slice(0, 10)),
+        datasets: [{
+            label: 'Cumulative P&L (₹)',
+            data: equityCurve.map(p => p[1]),
+            borderColor: '#0d6efd',
+            backgroundColor: 'rgba(13,110,253,0.1)',
+            fill: true,
+            pointRadius: 0,
+            tension: 0.1,
+        }],
+    },
+    options: {
+        responsive: true,
+        plugins: { legend: { display: false } },
+        scales: { x: { ticks: { maxTicksLimit: 12 } } },
+    },
+});
+</script>
+{% endif %}
+{% endblock %}
