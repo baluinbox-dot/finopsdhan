@@ -219,13 +219,29 @@ class BacktestRun(Base):
     # actually ran against).
     params: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
 
-    # queued -> running -> completed | failed. A row stuck in queued/running
-    # well past any plausible run time (see _STALE_RUNNING_MINUTES in
-    # app.routers.backtest) is treated as abandoned -- the OS OOM-killer can
-    # SIGKILL the subprocess outright, bypassing every in-process try/except
-    # this app could otherwise rely on to mark it "failed" itself.
+    # queued -> running -> completed | failed. "queued" has two distinct
+    # sub-states distinguished by pid (see below): a lone run or a sweep's
+    # first member is dispatched (pid set) the instant it's created and
+    # sits "queued" only for the brief window before its own subprocess
+    # flips it to "running" -- a row stuck there past the stale threshold
+    # is genuinely abandoned. A later sweep member is deliberately created
+    # with no pid at all, "queued" for as long as it takes earlier members
+    # to finish -- see app.engine.scheduler's queue-advance job, which
+    # dispatches it (setting pid) once the lock frees up. Only a
+    # *dispatched* (pid IS NOT NULL) queued/running row is ever reaped as
+    # stale -- an undispatched sweep member waiting its turn is expected
+    # to sit there, sometimes for a while, and must never be reaped.
     status: Mapped[str] = mapped_column(String(20), default="queued", nullable=False)
     pid: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    # Sweep support: several BacktestRun rows sharing one sweep_id are one
+    # parameter sweep (see app.routers.backtest's sweep submit/comparison
+    # routes) -- sweep_param names which top-level params key varies
+    # across them, sweep_value is this row's own value of it. All three
+    # None for an ordinary single-value run (not part of any sweep).
+    sweep_id: Mapped[uuid.UUID | None] = mapped_column(nullable=True, index=True)
+    sweep_param: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    sweep_value: Mapped[float | None] = mapped_column(Numeric(18, 4), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, nullable=False)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

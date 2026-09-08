@@ -25,6 +25,7 @@ from app.db import SessionLocal
 from app.engine.daily_summary import send_daily_summaries_for_all_users
 from app.engine.runner import run_user_strategy
 from app.models import User, UserStrategy
+from app.routers.backtest import advance_backtest_queue
 
 logger = logging.getLogger("app.engine.scheduler")
 
@@ -87,6 +88,16 @@ def _send_daily_summaries() -> None:
         db.close()
 
 
+def _advance_backtest_queue() -> None:
+    db = SessionLocal()
+    try:
+        advance_backtest_queue(db)
+    except Exception:
+        logger.exception("Backtest queue-advance tick failed")
+    finally:
+        db.close()
+
+
 def _parse_hhmm(value: str) -> tuple[int, int]:
     hour, minute = (value or "15:35").split(":")
     return int(hour), int(minute)
@@ -117,10 +128,18 @@ def start_scheduler() -> BackgroundScheduler:
         max_instances=1,
         coalesce=True,
     )
+    _scheduler.add_job(
+        _advance_backtest_queue,
+        "interval",
+        seconds=settings.backtest_queue_poll_seconds,
+        id="backtest_queue_advance",
+        max_instances=1,
+        coalesce=True,
+    )
     _scheduler.start()
     logger.info(
-        "Strategy scheduler started (interval=%ss, daily summary at %02d:%02d IST)",
-        settings.strategy_poll_interval_seconds, summary_hour, summary_minute,
+        "Strategy scheduler started (interval=%ss, daily summary at %02d:%02d IST, backtest queue poll=%ss)",
+        settings.strategy_poll_interval_seconds, summary_hour, summary_minute, settings.backtest_queue_poll_seconds,
     )
     return _scheduler
 

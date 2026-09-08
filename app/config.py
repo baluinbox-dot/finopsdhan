@@ -82,6 +82,12 @@ class Settings(BaseSettings):
     # once the CSVs are loaded) without being so long a truly stuck lock
     # sits unusable for hours.
     backtest_stale_running_minutes: int = 30
+    # How often the scheduler checks for a sweep's next undispatched
+    # member and dispatches it once the one-at-a-time lock is free.
+    # Backtests are fast (seconds to low minutes against the data sizes
+    # seen so far), so a short interval keeps a sweep feeling continuous
+    # rather than pausing visibly between values.
+    backtest_queue_poll_seconds: int = 15
 
     # --- Outbound email (verification links, password reset) ---
     # Empty smtp_host means "not configured" — app.email.send_email logs a

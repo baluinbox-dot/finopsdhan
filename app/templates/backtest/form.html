@@ -52,12 +52,73 @@
                 <label class="form-label small mb-0">Lots</label>
                 <input type="number" name="lots" class="form-control" value="{{ selected_lots }}" min="1" required>
             </div>
+
+            {% if sweepable_params %}
+            <div class="col-12">
+                <hr class="my-1">
+                <label class="form-label small mb-0">Sweep a parameter (optional)</label>
+                <div class="row g-2">
+                    <div class="col-6">
+                        <select name="sweep_param" class="form-select form-select-sm">
+                            <option value="">— Run once with current settings —</option>
+                            {% for p in sweepable_params %}
+                            <option value="{{ p }}">{{ p }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div class="col-6">
+                        <input type="text" name="sweep_values" class="form-control form-control-sm"
+                               placeholder="e.g. 300, 500, 1000 (up to {{ max_sweep_values }})">
+                    </div>
+                </div>
+                <p class="small text-body-secondary mt-1 mb-0">
+                    Pick a parameter and list 2–{{ max_sweep_values }} comma-separated values to compare — runs one
+                    backtest per value (queued, one at a time behind the same server-wide limit) and shows them
+                    side by side once done. Leave both blank to just run once with the settings above.
+                </p>
+            </div>
+            {% endif %}
+
             <div class="col-12">
                 <button class="btn btn-primary w-100" type="submit" {{ 'disabled' if lock_row else '' }}>Run Backtest</button>
             </div>
         </form>
     </div>
 </div>
+
+{% if recent_sweeps %}
+<h5 class="mb-2">Your Recent Sweeps</h5>
+<div class="table-responsive mb-4">
+    <table class="table table-sm align-middle">
+        <thead>
+            <tr>
+                <th>Started</th>
+                <th>Parameter</th>
+                <th>Values</th>
+                <th>Status</th>
+                <th></th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for sweep in recent_sweeps %}
+            <tr>
+                <td>{{ (sweep.created_at | to_ist).strftime('%d %b, %H:%M') ~ ' IST' if sweep.created_at else '' }}</td>
+                <td><code>{{ sweep.sweep_param }}</code></td>
+                <td>{{ sweep.count }} values</td>
+                <td>
+                    {% if sweep.status == 'completed' %}<span class="badge text-bg-success">Completed</span>
+                    {% elif sweep.status == 'partial' %}<span class="badge text-bg-warning">Partially done</span>
+                    {% elif sweep.status == 'failed' %}<span class="badge text-bg-danger">Failed</span>
+                    {% elif sweep.status == 'running' %}<span class="badge text-bg-primary">Running</span>
+                    {% else %}<span class="badge text-bg-secondary">Queued</span>{% endif %}
+                </td>
+                <td><a href="{{ url('/backtest/' ~ strategy.id ~ '/sweeps/' ~ sweep.sweep_id) }}" class="btn btn-outline-secondary btn-sm">View</a></td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
 
 <h5 class="mb-2">Your Recent Runs</h5>
 {% if not recent_runs %}
