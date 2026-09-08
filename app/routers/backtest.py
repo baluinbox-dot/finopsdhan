@@ -1,23 +1,37 @@
-"""In-app Backtest feature (Phase C): pick a strategy + underlying + date
-range, run it against the locally downloaded historical cache, see the
-result on a status page. The actual run happens in a detached OS
-subprocess (scripts/backtest/run_single_backtest.py) -- never inside this
-uvicorn process, since loading a whole underlying's CSV cache is a
-few-hundred-MB operation and this app's deploy VM has a documented history
-of near-OOM incidents.
+"""In-app Backtest feature (Phase C, + parameter sweeps): pick a strategy +
+underlying + date range, run it against the locally downloaded historical
+cache, see the result on a status page. The actual run happens in a
+detached OS subprocess (scripts/backtest/run_single_backtest.py) -- never
+inside this uvicorn process, since loading a whole underlying's CSV cache
+is a few-hundred-MB operation and this app's deploy VM has a documented
+history of near-OOM incidents.
 
-Two safeguards, both enforced here (not in the subprocess, which by the
+Three safeguards, all enforced here (not in the subprocess, which by the
 time it runs has already committed to running):
   - Global one-at-a-time lock: only one backtest_runs row may be
-    queued/running across the whole app at once, regardless of who asked --
-    the memory risk is shared VM-wide, not per-user.
+    *dispatched* (see below) across the whole app at once, regardless of
+    who asked -- the memory risk is shared VM-wide, not per-user.
   - Per-user cooldown: a minimum gap between one user's own submissions
     (backtest_min_interval_minutes), mostly insurance against an accidental
     double-submit rather than a real abuse concern.
-A stuck queued/running row past backtest_stale_running_minutes is treated
-as abandoned and auto-failed before either check runs -- the OS OOM-killer
-can SIGKILL the subprocess outright, bypassing every in-process try/except
-it could otherwise rely on to release the lock itself."""
+  - A hard cap (_MAX_SWEEP_VALUES) on how many values one sweep can queue,
+    since each is a full subprocess run and they queue up serially behind
+    the one-at-a-time lock.
+A stuck dispatched row past backtest_stale_running_minutes is treated as
+abandoned and auto-failed before any of the above runs -- the OS
+OOM-killer can SIGKILL the subprocess outright, bypassing every in-process
+try/except that could otherwise release the lock itself.
+
+Sweeps: submitting with a non-empty sweep_param creates several
+backtest_runs rows (one per value, sharing one sweep_id) instead of one.
+Only the first is *dispatched* immediately (subprocess spawned, pid set);
+the rest sit "queued" with no pid at all -- genuinely waiting their turn,
+not a transient state, and NEVER reaped as stale (see BacktestRun's own
+docstring for the pid-based distinction this whole module leans on).
+app.engine.scheduler's periodic queue-advance job calls
+advance_backtest_queue() below, which dispatches the next undispatched row
+once the lock frees up -- this is the only mechanism that makes a sweep's
+2nd..Nth member ever actually run."""
 
 from __future__ import annotations
 
@@ -30,7 +44,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import RedirectResponse
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 from app.config import get_settings
 from app.deps import CurrentUser, DbSession
@@ -39,6 +53,18 @@ from app.strategies.registry import BACKTEST_READY_STRATEGIES, get_strategy_clas
 from app.templating import flash, render, url
 
 router = APIRouter(prefix="/backtest", tags=["backtest"])
+
+# A sweep queues this many full subprocess runs serially behind the
+# one-at-a-time lock -- capped so a single submission can't monopolize the
+# app's one backtest slot for an unbounded stretch (each run takes seconds
+# to low minutes against the data sizes seen so far, so even the cap is
+# comfortably a few minutes worst-case, not hours).
+_MAX_SWEEP_VALUES = 10
+
+# Params never offered for sweeping even though they're numeric --
+# already their own dedicated form fields (underlying/date range aren't
+# numeric anyway), or sweeping them wouldn't mean what a user expects.
+_NON_SWEEPABLE_PARAM_KEYS = {"underlying", "lots"}
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DATA_ROOT = REPO_ROOT / "data" / "backtest"
@@ -110,27 +136,128 @@ def _resolve_base_params(db: DbSession, strategy: Strategy, current_user, user_s
     return {**class_defaults, **strategy.default_params, **(existing.params if existing else {})}
 
 
+def _sweepable_params(base_params: dict) -> list[str]:
+    """Top-level keys of base_params whose value is a plain number -- the
+    only shape a sweep can vary (a nested dict, e.g. Single-Leg Seller's
+    stop_loss/target sub-objects, isn't sweepable in v1). bool is
+    deliberately excluded even though it's technically an int subclass in
+    Python -- sweeping "hedge_enabled" across [0, 1] would be a confusing
+    way to spell True/False."""
+    return sorted(
+        k for k, v in base_params.items()
+        if k not in _NON_SWEEPABLE_PARAM_KEYS and isinstance(v, (int, float)) and not isinstance(v, bool)
+    )
+
+
+def _dispatched_filter():
+    """A row counts toward the one-at-a-time lock (and the stale-reap
+    check) only once it's actually dispatched -- status=="running", or
+    status=="queued" with a pid already assigned (a lone run or a sweep's
+    first member, in the brief window before its own subprocess flips it
+    to "running"). A sweep's later, undispatched members (status=="queued",
+    pid IS NULL) are a real wait queue, not a stuck/abandoned state --
+    see BacktestRun's own docstring."""
+    return or_(BacktestRun.status == "running", (BacktestRun.status == "queued") & BacktestRun.pid.is_not(None))
+
+
 def _active_lock_row(db: DbSession) -> BacktestRun | None:
     """The backtest_runs row (if any) currently holding the global
-    one-at-a-time lock -- queued or running. Call _reap_stale_runs first so
-    an abandoned row doesn't hold this forever."""
+    one-at-a-time lock. Call _reap_stale_runs first so an abandoned row
+    doesn't hold this forever."""
+    return db.scalars(select(BacktestRun).where(_dispatched_filter()).order_by(BacktestRun.created_at.desc())).first()
+
+
+def _next_undispatched_run(db: DbSession) -> BacktestRun | None:
+    """The oldest sweep member still waiting for a subprocess (status ==
+    "queued", pid IS NULL) -- what advance_backtest_queue dispatches next
+    once the lock frees up."""
     return db.scalars(
-        select(BacktestRun).where(BacktestRun.status.in_(["queued", "running"]))
-        .order_by(BacktestRun.created_at.desc())
+        select(BacktestRun).where(BacktestRun.status == "queued", BacktestRun.pid.is_(None))
+        .order_by(BacktestRun.created_at.asc())
     ).first()
 
 
 def _reap_stale_runs(db: DbSession) -> None:
     cutoff = _now() - timedelta(minutes=get_settings().backtest_stale_running_minutes)
-    stale = db.scalars(
-        select(BacktestRun).where(BacktestRun.status.in_(["queued", "running"]), BacktestRun.created_at < cutoff)
-    ).all()
+    stale = db.scalars(select(BacktestRun).where(_dispatched_filter(), BacktestRun.created_at < cutoff)).all()
     for run in stale:
         run.status = "failed"
         run.error_message = "Assumed crashed (stuck in progress past the stale-run threshold) -- lock released."
         run.finished_at = _now()
     if stale:
         db.commit()
+
+
+def _spawn_subprocess(db: DbSession, run: BacktestRun) -> None:
+    """Actually dispatch one backtest_runs row: spawn its detached
+    subprocess and record the pid. Shared by backtest_submit (dispatches a
+    lone run, or a sweep's first member, immediately inline) and
+    advance_backtest_queue (dispatches a sweep's later members once the
+    lock frees up)."""
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    # Close the parent's fd right after Popen returns -- the child has
+    # already had it duplicated onto its own stdout by then, so this
+    # doesn't affect the child's output, and skipping it would leak one
+    # open file handle per submission for the life of this long-running
+    # web server process.
+    with open(LOG_DIR / f"{run.id}.log", "ab") as log_file:
+        proc = subprocess.Popen(
+            [sys.executable, str(RUN_SCRIPT), str(run.id)],
+            cwd=str(REPO_ROOT), stdout=log_file, stderr=subprocess.STDOUT,
+            start_new_session=True,  # detached -- keeps running independent of this request/worker
+        )
+    run.pid = proc.pid
+    db.commit()
+
+
+def advance_backtest_queue(db: DbSession) -> None:
+    """Called periodically by app.engine.scheduler -- dispatches the next
+    undispatched sweep member once the lock is free. A lone run or a
+    sweep's first member is always dispatched immediately inline in
+    backtest_submit, so in practice this only ever matters for sweep
+    continuations (a sweep's 2nd..Nth value)."""
+    _reap_stale_runs(db)
+    if _active_lock_row(db) is not None:
+        return
+    next_run = _next_undispatched_run(db)
+    if next_run is None:
+        return
+    _spawn_subprocess(db, next_run)
+
+
+def _recent_sweeps(db: DbSession, strategy_id: uuid.UUID, user_id: uuid.UUID, limit: int = 5) -> list[dict]:
+    """One summary entry per recent sweep (grouped from its member rows in
+    Python -- there are never more than _MAX_SWEEP_VALUES of them, so this
+    is cheap), newest first, with an aggregate status a viewer can scan at
+    a glance without opening the sweep."""
+    members = db.scalars(
+        select(BacktestRun).where(
+            BacktestRun.strategy_id == strategy_id, BacktestRun.user_id == user_id, BacktestRun.sweep_id.is_not(None),
+        ).order_by(BacktestRun.created_at.desc()).limit(limit * _MAX_SWEEP_VALUES)
+    ).all()
+    grouped: dict[uuid.UUID, list[BacktestRun]] = {}
+    for m in members:
+        grouped.setdefault(m.sweep_id, []).append(m)
+
+    summaries = []
+    for sweep_id, rows in grouped.items():
+        statuses = {r.status for r in rows}
+        if statuses == {"completed"}:
+            agg = "completed"
+        elif "running" in statuses or ("queued" in statuses and rows[0].pid is not None):
+            agg = "running"
+        elif statuses <= {"queued"}:
+            agg = "queued"
+        elif "completed" in statuses:
+            agg = "partial"
+        else:
+            agg = "failed"
+        summaries.append({
+            "sweep_id": sweep_id, "sweep_param": rows[0].sweep_param,
+            "created_at": max(r.created_at for r in rows), "count": len(rows), "status": agg,
+        })
+    summaries.sort(key=lambda s: s["created_at"], reverse=True)
+    return summaries[:limit]
 
 
 @router.get("/{strategy_id}")
@@ -151,9 +278,12 @@ def backtest_form(
     lock_row = _active_lock_row(db)
 
     recent_runs = db.scalars(
-        select(BacktestRun).where(BacktestRun.strategy_id == strategy_id, BacktestRun.user_id == current_user.id)
-        .order_by(BacktestRun.created_at.desc()).limit(10)
+        select(BacktestRun).where(
+            BacktestRun.strategy_id == strategy_id, BacktestRun.user_id == current_user.id,
+            BacktestRun.sweep_id.is_(None),
+        ).order_by(BacktestRun.created_at.desc()).limit(10)
     ).all()
+    recent_sweeps = _recent_sweeps(db, strategy_id, current_user.id)
 
     return render(
         request,
@@ -170,8 +300,31 @@ def backtest_form(
             "today": date.today(),
             "lock_row": lock_row,
             "recent_runs": recent_runs,
+            "recent_sweeps": recent_sweeps,
+            "sweepable_params": _sweepable_params(base_params),
+            "max_sweep_values": _MAX_SWEEP_VALUES,
         },
     )
+
+
+def _parse_sweep_values(raw: str) -> list[float] | str:
+    """Comma-separated numbers -> a deduped, order-preserving list of
+    floats, or an error message string (never both) -- 2..._MAX_SWEEP_VALUES
+    of them, since a sweep of 0 or 1 value is just an ordinary run."""
+    pieces = [p.strip() for p in raw.split(",") if p.strip()]
+    values: list[float] = []
+    for p in pieces:
+        try:
+            v = float(p)
+        except ValueError:
+            return f"'{p}' isn't a number."
+        if v not in values:
+            values.append(v)
+    if len(values) < 2:
+        return "Enter at least 2 different values, separated by commas, to sweep a parameter."
+    if len(values) > _MAX_SWEEP_VALUES:
+        return f"A sweep can compare at most {_MAX_SWEEP_VALUES} values at once (got {len(values)})."
+    return values
 
 
 @router.post("/{strategy_id}")
@@ -185,6 +338,8 @@ def backtest_submit(
     end_date: date = Form(...),
     lots: int = Form(1),
     user_strategy_id: str = Form(""),
+    sweep_param: str = Form(""),
+    sweep_values: str = Form(""),
 ):
     strategy, redirect = _load_strategy_or_redirect(db, request, strategy_id)
     if redirect:
@@ -211,6 +366,18 @@ def backtest_submit(
         flash(request, "Lots must be greater than zero.", "error")
         return back
 
+    params = _resolve_base_params(db, strategy, current_user, user_strategy_id)
+    sweep_values_list: list[float] | None = None
+    if sweep_param:
+        if sweep_param not in _sweepable_params(params):
+            flash(request, "That parameter can't be swept for this strategy.", "error")
+            return back
+        parsed = _parse_sweep_values(sweep_values)
+        if isinstance(parsed, str):
+            flash(request, parsed, "error")
+            return back
+        sweep_values_list = parsed
+
     _reap_stale_runs(db)
     lock_row = _active_lock_row(db)
     if lock_row is not None:
@@ -233,34 +400,41 @@ def backtest_submit(
             flash(request, f"Please wait {wait_minutes} more minute(s) before starting another backtest.", "error")
             return back
 
-    params = _resolve_base_params(db, strategy, current_user, user_strategy_id)
     params["underlying"] = underlying
     params["lots"] = lots
 
-    run = BacktestRun(
-        user_id=current_user.id, strategy_id=strategy_id, underlying=underlying,
-        start_date=start_date, end_date=end_date, params=params, status="queued",
-    )
-    db.add(run)
-    db.commit()
-    db.refresh(run)
-
-    LOG_DIR.mkdir(parents=True, exist_ok=True)
-    # Close the parent's fd right after Popen returns -- the child has
-    # already had it duplicated onto its own stdout by then, so this
-    # doesn't affect the child's output, and skipping it would leak one
-    # open file handle per submission for the life of this long-running
-    # web server process.
-    with open(LOG_DIR / f"{run.id}.log", "ab") as log_file:
-        proc = subprocess.Popen(
-            [sys.executable, str(RUN_SCRIPT), str(run.id)],
-            cwd=str(REPO_ROOT), stdout=log_file, stderr=subprocess.STDOUT,
-            start_new_session=True,  # detached -- keeps running independent of this request/worker
+    if sweep_values_list is None:
+        run = BacktestRun(
+            user_id=current_user.id, strategy_id=strategy_id, underlying=underlying,
+            start_date=start_date, end_date=end_date, params=params, status="queued",
         )
-    run.pid = proc.pid
-    db.commit()
+        db.add(run)
+        db.commit()
+        db.refresh(run)
+        _spawn_subprocess(db, run)
+        return RedirectResponse(url(f"/backtest/{strategy_id}/runs/{run.id}"), status_code=303)
 
-    return RedirectResponse(url(f"/backtest/{strategy_id}/runs/{run.id}"), status_code=303)
+    # Sweep: one row per value, all sharing one sweep_id -- only the first
+    # is dispatched now; advance_backtest_queue (app.engine.scheduler)
+    # picks up the rest as the lock frees up, one at a time.
+    sweep_id = uuid.uuid4()
+    first_run: BacktestRun | None = None
+    for value in sweep_values_list:
+        run_params = dict(params)
+        run_params[sweep_param] = value
+        run = BacktestRun(
+            user_id=current_user.id, strategy_id=strategy_id, underlying=underlying,
+            start_date=start_date, end_date=end_date, params=run_params, status="queued",
+            sweep_id=sweep_id, sweep_param=sweep_param, sweep_value=value,
+        )
+        db.add(run)
+        if first_run is None:
+            first_run = run
+    db.commit()
+    db.refresh(first_run)
+    _spawn_subprocess(db, first_run)
+
+    return RedirectResponse(url(f"/backtest/{strategy_id}/sweeps/{sweep_id}"), status_code=303)
 
 
 @router.get("/{strategy_id}/runs/{run_id}")
@@ -285,5 +459,45 @@ def backtest_status(
         {
             "current_user": current_user, "strategy": strategy, "run": run,
             "equity_curve_json": equity_curve_json,
+        },
+    )
+
+
+@router.get("/{strategy_id}/sweeps/{sweep_id}")
+def backtest_sweep_status(
+    request: Request, db: DbSession, current_user: CurrentUser, strategy_id: uuid.UUID, sweep_id: uuid.UUID,
+):
+    strategy, redirect = _load_strategy_or_redirect(db, request, strategy_id)
+    if redirect:
+        return redirect
+
+    runs = db.scalars(
+        select(BacktestRun).where(BacktestRun.sweep_id == sweep_id, BacktestRun.strategy_id == strategy_id)
+        .order_by(BacktestRun.sweep_value.asc())
+    ).all()
+    is_owner_or_admin = bool(runs) and (runs[0].user_id == current_user.id or current_user.role == UserRole.SUPERADMIN)
+    if not runs or not is_owner_or_admin:
+        flash(request, "Sweep not found.", "error")
+        return RedirectResponse(url(f"/backtest/{strategy_id}"), status_code=303)
+
+    all_done = all(r.status in ("completed", "failed") for r in runs)
+    completed = [r for r in runs if r.status == "completed"]
+    headline = max(completed, key=lambda r: (r.result or {}).get("total_pnl", float("-inf"))) if completed else None
+
+    chart_data = json.dumps([
+        {
+            "value": float(r.sweep_value), "status": r.status,
+            "total_pnl": (r.result or {}).get("total_pnl") if r.status == "completed" else None,
+        }
+        for r in runs
+    ])
+
+    return render(
+        request,
+        "backtest/sweep_status.html",
+        {
+            "current_user": current_user, "strategy": strategy, "runs": runs,
+            "sweep_id": sweep_id, "sweep_param": runs[0].sweep_param,
+            "all_done": all_done, "headline": headline, "chart_data": chart_data,
         },
     )

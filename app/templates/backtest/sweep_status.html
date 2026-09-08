@@ -1,0 +1,92 @@
+{% extends "base.html" %}
+{% block title %}Sweep Result — {{ strategy.name }} — FinOps Algo{% endblock %}
+{% block content %}
+{% if not all_done %}
+<meta http-equiv="refresh" content="5">
+{% endif %}
+
+<h4 class="mb-1">Sweep: {{ strategy.name }}</h4>
+<p class="text-body-secondary small">
+    Sweeping <code>{{ sweep_param }}</code> across {{ runs | length }} value(s) — {{ runs[0].underlying }} ·
+    {{ runs[0].start_date }} → {{ runs[0].end_date }} · {{ runs[0].params.get('lots', 1) }} lot(s)
+</p>
+
+{% if not all_done %}
+<div class="alert alert-secondary">
+    Still working through the queue — this page refreshes automatically. Values run one at a time, behind the
+    same server-wide one-backtest-at-a-time limit as everything else.
+</div>
+{% endif %}
+
+<div class="table-responsive mb-3">
+    <table class="table table-sm align-middle">
+        <thead>
+            <tr>
+                <th>{{ sweep_param }}</th>
+                <th>Status</th>
+                <th>Trades</th>
+                <th>Win Rate</th>
+                <th>Net P&amp;L</th>
+                <th>Max Drawdown</th>
+                <th></th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for run in runs %}
+            {% set r = run.result or {} %}
+            <tr class="{{ 'table-active' if headline and run.id == headline.id else '' }}">
+                <td><strong>{{ run.sweep_value | float }}</strong>{{ ' (best)' if headline and run.id == headline.id else '' }}</td>
+                <td>
+                    {% if run.status == 'completed' %}<span class="badge text-bg-success">Completed</span>
+                    {% elif run.status == 'failed' %}<span class="badge text-bg-danger">Failed</span>
+                    {% elif run.status == 'running' %}<span class="badge text-bg-primary">Running</span>
+                    {% else %}<span class="badge text-bg-secondary">Queued</span>{% endif %}
+                </td>
+                <td>{{ r.get('trade_count', '—') if run.status == 'completed' else '—' }}</td>
+                <td>{{ '%.1f'|format(r.get('win_rate')) ~ '%' if run.status == 'completed' and r.get('win_rate') is not none else '—' }}</td>
+                <td class="{{ 'text-success' if run.status == 'completed' and r.get('total_pnl', 0) >= 0 else 'text-danger' if run.status == 'completed' else '' }}">
+                    {{ '₹{:,.0f}'.format(r.get('total_pnl', 0)) if run.status == 'completed' else ('—' if run.status != 'failed' else run.error_message) }}
+                </td>
+                <td>{{ '₹{:,.0f}'.format(r.get('max_drawdown', 0)) if run.status == 'completed' else '—' }}</td>
+                <td><a href="{{ url('/backtest/' ~ strategy.id ~ '/runs/' ~ run.id) }}" class="btn btn-outline-secondary btn-sm">Details</a></td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+{% if headline %}
+<div class="card stat-card mb-4">
+    <div class="card-body">
+        <canvas id="sweepChart" height="90"></canvas>
+    </div>
+</div>
+{% endif %}
+
+<a href="{{ url('/backtest/' ~ strategy.id) }}" class="btn btn-link ps-0">← Back to Backtest</a>
+{% endblock %}
+
+{% block scripts %}
+{% if headline %}
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<script>
+const points = {{ chart_data | safe }};
+const done = points.filter(p => p.status === 'completed');
+new Chart(document.getElementById('sweepChart'), {
+    type: 'bar',
+    data: {
+        labels: done.map(p => p.value),
+        datasets: [{
+            label: 'Net P&L (₹)',
+            data: done.map(p => p.total_pnl),
+            backgroundColor: done.map(p => p.total_pnl >= 0 ? '#198754' : '#dc3545'),
+        }],
+    },
+    options: {
+        responsive: true,
+        plugins: { legend: { display: false } },
+    },
+});
+</script>
+{% endif %}
+{% endblock %}
