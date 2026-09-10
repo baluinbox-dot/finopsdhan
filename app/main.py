@@ -14,7 +14,7 @@ from app.config import get_settings
 from app.deps import CurrentUserOptional
 from app.dhan import diagnostics as dhan_diagnostics
 from app.engine.scheduler import start_scheduler, stop_scheduler
-from app.routers import admin, auth, backtest, dashboard, reports, settings as settings_router, strategies
+from app.routers import admin, auth, backtest, dashboard, notes, reports, settings as settings_router, strategies
 from app.seed import seed_demo_strategy
 from app.templating import static_url, url
 
@@ -55,6 +55,7 @@ app.include_router(strategies.router, prefix=settings.base_path)
 app.include_router(backtest.router, prefix=settings.base_path)
 app.include_router(dashboard.router, prefix=settings.base_path)
 app.include_router(reports.router, prefix=settings.base_path)
+app.include_router(notes.router, prefix=settings.base_path)
 app.include_router(admin.router, prefix=settings.base_path)
 
 
