@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% block title %}Notes — FinOps Algo{% endblock %}
+{% block content %}
+<h4 class="mb-1">Trading Notes</h4>
+<p class="text-body-secondary small">
+    A personal journal, one note per day — market view, India VIX, how today's trades went, anything worth
+    remembering. Just for you; never read by the strategy engine.
+</p>
+
+<div class="card stat-card mb-4" style="max-width: 720px;">
+    <div class="card-body">
+        <form method="get" action="{{ url('/notes') }}" class="row g-2 align-items-end mb-3">
+            <div class="col-auto">
+                <label class="form-label small mb-0">Date</label>
+                <input type="date" name="note_date" class="form-control form-control-sm"
+                       value="{{ selected_date.isoformat() }}" max="{{ today.isoformat() }}"
+                       onchange="this.form.submit()">
+            </div>
+            {% if selected_date != today %}
+            <div class="col-auto">
+                <a href="{{ url('/notes') }}" class="btn btn-outline-secondary btn-sm">Back to Today</a>
+            </div>
+            {% endif %}
+        </form>
+
+        <form method="post" action="{{ url('/notes') }}">
+            <input type="hidden" name="note_date" value="{{ selected_date.isoformat() }}">
+            <label class="form-label small mb-1">
+                {{ 'Today' if selected_date == today else selected_date.strftime('%A, %d %b %Y') }}
+            </label>
+            <textarea name="content" class="form-control" rows="10"
+                      placeholder="e.g. Nifty range-bound, VIX at 13.2 — low, expected premium decay slow. RSI Call Writing stopped out at 15:25, roll went fine. Watch for a gap-up tomorrow before entering.">{{ content }}</textarea>
+            <button class="btn btn-primary mt-2" type="submit">Save Note</button>
+        </form>
+    </div>
+</div>
+
+<h5 class="mb-2">Recent Notes</h5>
+{% if not recent_notes %}
+<p class="text-body-secondary small">No other notes yet.</p>
+{% else %}
+<div class="list-group" style="max-width: 720px;">
+    {% for note in recent_notes %}
+    <div class="list-group-item">
+        <div class="d-flex justify-content-between align-items-start">
+            <a href="{{ url('/notes') }}?note_date={{ note.note_date.isoformat() }}" class="fw-semibold text-decoration-none">
+                {{ note.note_date.strftime('%a, %d %b %Y') }}
+            </a>
+            <form method="post" action="{{ url('/notes/' ~ note.id ~ '/delete') }}"
+                  onsubmit="return confirm('Delete the note for {{ note.note_date.isoformat() }}?');">
+                <button class="btn btn-sm btn-outline-danger py-0 px-2" type="submit" title="Delete">&times;</button>
+            </form>
+        </div>
+        <div class="small text-body-secondary" style="white-space: pre-wrap;">{{ note.content[:220] }}{{ '…' if note.content | length > 220 else '' }}</div>
+    </div>
+    {% endfor %}
+</div>
+{% endif %}
+{% endblock %}

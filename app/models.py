@@ -12,7 +12,7 @@ import enum
 import uuid
 from datetime import date, datetime, timezone
 
-from sqlalchemy import JSON, Boolean, Date, DateTime, Enum, ForeignKey, Integer, Numeric, String, Text
+from sqlalchemy import JSON, Boolean, Date, DateTime, Enum, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
@@ -291,3 +291,26 @@ class Order(Base):
     placed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, nullable=False)
 
     strategy_run: Mapped["StrategyRun | None"] = relationship(back_populates="orders")
+
+
+class TradeNote(Base):
+    """A free-text journal entry, one per user per calendar day (IST) --
+    market view, India VIX, how today's trades went, anything worth
+    remembering next time a similar setup shows up. Purely a personal
+    note: never read by the strategy engine, never affects any trade.
+    Editing "today's" note is just an upsert on (user_id, note_date) --
+    there's deliberately no separate revision history."""
+
+    __tablename__ = "trade_notes"
+    __table_args__ = (UniqueConstraint("user_id", "note_date", name="uq_trade_notes_user_date"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+
+    note_date: Mapped[date] = mapped_column(Date, nullable=False)
+    content: Mapped[str] = mapped_column(Text, default="", nullable=False)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now, nullable=False)
+
+    user: Mapped["User"] = relationship()
