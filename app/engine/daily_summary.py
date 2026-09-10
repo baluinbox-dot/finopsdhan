@@ -135,6 +135,15 @@ def _fmt_rupees(value: float | None) -> str:
     return f"-₹{abs(value):,.0f}" if value < 0 else f"₹{value:,.0f}"
 
 
+def _fmt_pct_of_margin(pnl: float, margin_used: float | None) -> str:
+    """P&L as a percentage of margin used -- return on capital for the
+    day, not return on the notional/premium. "—" when margin is unknown
+    or zero (can't divide), never a fabricated 0%."""
+    if not margin_used:
+        return "—"
+    return f"{pnl / margin_used * 100:+.1f}%"
+
+
 _AUTOMATION_NOTE = "Fully Automated — No Manual Intervention"
 _DISCLAIMER = "Disclaimer : Personal Trades | For transparency only | No advice or recommendations."
 
@@ -147,13 +156,13 @@ def _render_x_post(user: User, summary: dict[str, Any]) -> str | None:
     that has no place in a public post). None when nothing traded live
     that day, even if paper instances did -- there's nothing genuine to
     post, and silently showing a live total of zero would be misleading in
-    the other direction. Same automation note, per-strategy breakdown,
-    total, and disclaimer as the full email, just without the margin/mode
-    columns (X has no room for them, and mode is implied -- everything
-    here is live by construction). A standard X post caps out around 280
-    characters; with more than a couple of live strategies this will
-    likely still run past that -- Balu trims it himself or posts it as a
-    short thread, this just does the copying-the-numbers-together part."""
+    the other direction. Same automation note, per-strategy breakdown
+    (now including margin used and P&L as a % of it -- there's room for
+    both once the block is live-only), total, and disclaimer as the full
+    email. A standard X post caps out around 280 characters; with more
+    than a couple of live strategies this will likely still run past
+    that -- Balu trims it himself or posts it as a short thread, this
+    just does the copying-the-numbers-together part."""
     live_rows = [r for r in summary["rows"] if r["mode"] == "live"]
     if not live_rows:
         return None
@@ -162,9 +171,15 @@ def _render_x_post(user: User, summary: dict[str, Any]) -> str | None:
     lines = [f"Daily Strategy Summary — {date_str}", "", _AUTOMATION_NOTE, ""]
     for r in live_rows:
         status_note = " (open)" if r["still_open"] else ""
-        lines.append(f"{r['label']}{status_note}: {_fmt_rupees(r['pnl'])}")
+        pct = _fmt_pct_of_margin(r["pnl"], r["margin_used"])
+        lines.append(
+            f"{r['label']}{status_note}: {_fmt_rupees(r['pnl'])} ({pct}) "
+            f"| Margin {_fmt_rupees(r['margin_used'])}"
+        )
+    live_total = sum(r["pnl"] for r in live_rows)
+    live_margin = sum(r["margin_used"] for r in live_rows if r["margin_used"])
     lines += [
-        "", f"Total P&L: {_fmt_rupees(sum(r['pnl'] for r in live_rows))}", "",
+        "", f"Total P&L: {_fmt_rupees(live_total)} ({_fmt_pct_of_margin(live_total, live_margin)})", "",
         _DISCLAIMER, f"Interested? Reach out — {user.email}",
     ]
     return "\n".join(lines)
@@ -180,17 +195,19 @@ def _render_email(user: User, summary: dict[str, Any]) -> tuple[str, str, str]:
     for r in summary["rows"]:
         status_note = " (still open)" if r["still_open"] else ""
         unpriced_note = " — partial, unpriced leg" if r["still_open"] and not r["fully_priced"] else ""
+        pct = _fmt_pct_of_margin(r["pnl"], r["margin_used"])
         html_rows.append(
             "<tr>"
             f"<td>{r['label']}{status_note}</td>"
             f"<td>{r['mode'].title()}</td>"
             f"<td>{_fmt_rupees(r['margin_used'])}</td>"
             f"<td>{_fmt_rupees(r['pnl'])}{unpriced_note}</td>"
+            f"<td>{pct}</td>"
             "</tr>"
         )
         text_rows.append(
             f"- {r['label']}{status_note} | {r['mode'].title()} | "
-            f"Margin {_fmt_rupees(r['margin_used'])} | P&L {_fmt_rupees(r['pnl'])}{unpriced_note}"
+            f"Margin {_fmt_rupees(r['margin_used'])} | P&L {_fmt_rupees(r['pnl'])}{unpriced_note} | {pct} of margin"
         )
 
     footer_lines_html = [f"<p><em>{_DISCLAIMER}</em></p>", f"<p>Interested? Reach out — {user.email}</p>"]
@@ -232,7 +249,7 @@ def _render_email(user: User, summary: dict[str, Any]) -> tuple[str, str, str]:
         f"<h3>Daily Strategy Summary — {date_str}</h3>"
         f"<p><strong>{_AUTOMATION_NOTE}</strong></p>"
         "<table cellpadding='6' style='border-collapse:collapse' border='1'>"
-        "<tr><th>Strategy</th><th>Mode</th><th>Margin Used</th><th>P&amp;L</th></tr>"
+        "<tr><th>Strategy</th><th>Mode</th><th>Margin Used</th><th>P&amp;L</th><th>P&amp;L % of Margin</th></tr>"
         + "".join(html_rows) +
         "</table>"
         f"<p><strong>Total P&amp;L: {_fmt_rupees(summary['total_pnl'])}</strong></p>"
