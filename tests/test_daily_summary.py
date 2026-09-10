@@ -257,3 +257,49 @@ def test_send_all_skips_users_with_nothing_and_survives_one_users_failure(db_ses
     sent = send_daily_summaries_for_all_users(db_session)
 
     assert sent == 1  # only good_user's email actually went out
+
+
+# --- the copy-paste-ready X post block appended to the same email ---
+
+
+def test_send_email_includes_a_copyable_x_post_block(db_session, monkeypatch):
+    _no_dhan(monkeypatch)
+    user = _make_user(db_session, email="balu@example.com")
+    us = _make_instance(db_session, user, label="SENSEX Dynamic Strangle", mode=StrategyMode.LIVE)
+    _add_run(db_session, us, started_at=_now(), status="closed", realized_pnl=-350.0, entry_margin=60000.0)
+
+    captured = {}
+
+    def _fake_send_email(to_email, subject, *, html_body, text_body):
+        captured.update(html_body=html_body, text_body=text_body)
+        return True
+
+    monkeypatch.setattr(daily_summary, "send_email", _fake_send_email)
+    send_daily_summary_email(db_session, user)
+
+    text = captured["text_body"]
+    assert "--- Copy below to post on X ---" in text
+    assert "--- End ---" in text
+    x_block = text.split("--- Copy below to post on X ---")[1]
+    # The X block repeats the label/pnl/automation-note/disclaimer, but never
+    # margin or mode -- there's no room for those in a 280-char post.
+    assert "SENSEX Dynamic Strangle: -₹350" in x_block
+    assert "60,000" not in x_block
+    assert "Live" not in x_block
+    assert "Fully Automated — No Manual Intervention" in x_block
+    assert "Disclaimer : Personal Trades | For transparency only | No advice or recommendations." in x_block
+    assert "balu@example.com" in x_block
+
+    assert "📋 Copy below to post on X" in captured["html_body"]
+
+
+def test_render_x_post_marks_a_still_open_position(db_session, monkeypatch):
+    _no_dhan(monkeypatch)
+    user = _make_user(db_session, email="balu@example.com")
+    us = _make_instance(db_session, user, label="NIFTY Rolling")
+    _add_run(db_session, us, started_at=_now(), status="open", realized_pnl=0.0)
+
+    summary = build_user_daily_summary(db_session, user)
+    x_post = daily_summary._render_x_post(user, summary)
+
+    assert "NIFTY Rolling (open):" in x_post
