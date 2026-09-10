@@ -93,6 +93,71 @@ def _send_strategy_error_alert(user: User, user_strategy_id: uuid.UUID, strategy
         logger.exception("Failed to send strategy-error email alert for user_strategy_id=%s", user_strategy_id)
 
 
+def _send_entry_alert(user: User, strategy_name: str, run: StrategyRun, is_live: bool) -> None:
+    """Email the owner that a fresh position was just entered -- one email
+    per StrategyRun opened (scheduled or the manual "Enter Now" button),
+    no cooldown (unlike the error alert above, this fires on a real,
+    infrequent trading event, not a poll-tick condition that could repeat
+    every 30s). Never lets a mail-server hiccup propagate."""
+    legs = (run.legs_planned or {}).get("legs") or []
+    mode = "LIVE" if is_live else "PAPER"
+    leg_lines_html = "".join(
+        f"<li>{leg['transaction_type']} {leg['quantity']} × {leg['trading_symbol']} @ ₹{leg['price']:.2f}</li>"
+        for leg in legs
+    )
+    leg_lines_text = "\n".join(
+        f"- {leg['transaction_type']} {leg['quantity']} x {leg['trading_symbol']} @ Rs {leg['price']:.2f}"
+        for leg in legs
+    )
+    margin_line = f"₹{float(run.entry_margin):,.0f}" if run.entry_margin is not None else "unknown"
+
+    try:
+        send_email(
+            user.email,
+            f"[FinOps Algo] Entered: {strategy_name} ({mode})",
+            html_body=(
+                f"<p><b>{strategy_name}</b> entered a new position in <b>{mode}</b> mode.</p>"
+                f"<ul>{leg_lines_html}</ul>"
+                f"<p>Margin used: {margin_line}</p>"
+            ),
+            text_body=(
+                f"{strategy_name} entered a new position in {mode} mode.\n\n"
+                f"{leg_lines_text}\n\n"
+                f"Margin used: {margin_line}"
+            ),
+        )
+    except Exception:  # noqa: BLE001 — an alerting failure must never break strategy evaluation
+        logger.exception("Failed to send entry email alert for run_id=%s", run.id)
+
+
+def _send_close_alert(user: User, strategy_name: str, run: StrategyRun, is_live: bool) -> None:
+    """Email the owner that a position was just closed -- one email per
+    StrategyRun closed (scheduled exit or the manual "Close Now" button).
+    Never lets a mail-server hiccup propagate."""
+    mode = "LIVE" if is_live else "PAPER"
+    pnl = float(run.realized_pnl or 0)
+    result = "Profit" if pnl >= 0 else "Loss"
+    pnl_color = "#0a7a3d" if pnl >= 0 else "#a00000"
+
+    try:
+        send_email(
+            user.email,
+            f"[FinOps Algo] Closed: {strategy_name} ({mode}) — {result} ₹{abs(pnl):,.0f}",
+            html_body=(
+                f"<p><b>{strategy_name}</b> closed a position in <b>{mode}</b> mode.</p>"
+                f"<p>Realized P&amp;L: <b style='color:{pnl_color}'>₹{pnl:,.0f}</b></p>"
+                f"<p>Reason: {run.evaluation_notes}</p>"
+            ),
+            text_body=(
+                f"{strategy_name} closed a position in {mode} mode.\n\n"
+                f"Realized P&L: Rs {pnl:,.0f}\n"
+                f"Reason: {run.evaluation_notes}"
+            ),
+        )
+    except Exception:  # noqa: BLE001 — an alerting failure must never break strategy evaluation
+        logger.exception("Failed to send close email alert for run_id=%s", run.id)
+
+
 def find_open_run(user_strategy: UserStrategy) -> StrategyRun | None:
     for run in sorted(user_strategy.runs, key=lambda r: r.started_at, reverse=True):
         if run.status == "open":
@@ -575,7 +640,7 @@ def run_user_strategy(db: Session, user_strategy: UserStrategy) -> None:
 
             should_exit = impl.evaluate_exit(exit_ctx, open_run.legs_planned or {})
             if should_exit:
-                _close_open_run(
+                closed = _close_open_run(
                     db,
                     user_dhan.client,
                     user.id,
@@ -583,6 +648,8 @@ def run_user_strategy(db: Session, user_strategy: UserStrategy) -> None:
                     is_live=is_live,
                     reason="Exit conditions met; opposite-side orders placed for all legs.",
                 )
+                if closed:
+                    _send_close_alert(user, strategy.name, open_run, is_live)
                 return
 
             # Whole-position exit didn't fire — give strategies that manage
@@ -610,7 +677,8 @@ def run_user_strategy(db: Session, user_strategy: UserStrategy) -> None:
         if not legs:
             return
 
-        _execute_entry(db, user_dhan.client, user.id, user_strategy.id, legs, entry_params, is_live=is_live)
+        run = _execute_entry(db, user_dhan.client, user.id, user_strategy.id, legs, entry_params, is_live=is_live)
+        _send_entry_alert(user, strategy.name, run, is_live)
 
     except Exception as exc:
         db.rollback()
@@ -632,6 +700,7 @@ def close_user_strategy_now(db: Session, user_strategy: UserStrategy) -> bool:
         return False
 
     user = user_strategy.user
+    strategy = user_strategy.strategy
     settings = get_settings()
     is_live = user_strategy.mode == StrategyMode.LIVE and settings.allow_live_trading
 
@@ -653,6 +722,7 @@ def close_user_strategy_now(db: Session, user_strategy: UserStrategy) -> bool:
         raise RuntimeError(
             "Could not fetch a fresh market quote for every leg — nothing was closed. Please try again in a moment."
         )
+    _send_close_alert(user, strategy.name, open_run, is_live)
     return True
 
 
@@ -696,5 +766,6 @@ def enter_user_strategy_now(db: Session, user_strategy: UserStrategy) -> bool:
     if not legs:
         return False
 
-    _execute_entry(db, user_dhan.client, user.id, user_strategy.id, legs, entry_params, is_live=is_live)
+    run = _execute_entry(db, user_dhan.client, user.id, user_strategy.id, legs, entry_params, is_live=is_live)
+    _send_entry_alert(user, strategy.name, run, is_live)
     return True
