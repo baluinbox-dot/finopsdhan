@@ -139,21 +139,32 @@ _AUTOMATION_NOTE = "Fully Automated — No Manual Intervention"
 _DISCLAIMER = "Disclaimer : Personal Trades | For transparency only | No advice or recommendations."
 
 
-def _render_x_post(user: User, summary: dict[str, Any]) -> str:
-    """A condensed, copy-paste-ready version of the same summary for
-    posting to X/Twitter by hand -- same automation note, per-strategy
-    breakdown, total, and disclaimer as the full email, just without the
-    margin/mode columns (X has no room for them). A standard X post caps
-    out around 280 characters; with several active strategies this will
-    likely run past that -- Balu trims it himself or posts it as a short
-    thread, this just does the copying-the-numbers-together part for him."""
+def _render_x_post(user: User, summary: dict[str, Any]) -> str | None:
+    """A condensed, copy-paste-ready version of the summary for posting to
+    X/Twitter by hand -- LIVE strategies only (Balu's own call: "Personal
+    Trades" in the disclaimer means real trades, and he only plans to run
+    one or two instances live at a time, everything else is paper/testing
+    that has no place in a public post). None when nothing traded live
+    that day, even if paper instances did -- there's nothing genuine to
+    post, and silently showing a live total of zero would be misleading in
+    the other direction. Same automation note, per-strategy breakdown,
+    total, and disclaimer as the full email, just without the margin/mode
+    columns (X has no room for them, and mode is implied -- everything
+    here is live by construction). A standard X post caps out around 280
+    characters; with more than a couple of live strategies this will
+    likely still run past that -- Balu trims it himself or posts it as a
+    short thread, this just does the copying-the-numbers-together part."""
+    live_rows = [r for r in summary["rows"] if r["mode"] == "live"]
+    if not live_rows:
+        return None
+
     date_str = summary["date"].strftime("%d %b %Y")
     lines = [f"Daily Strategy Summary — {date_str}", "", _AUTOMATION_NOTE, ""]
-    for r in summary["rows"]:
+    for r in live_rows:
         status_note = " (open)" if r["still_open"] else ""
         lines.append(f"{r['label']}{status_note}: {_fmt_rupees(r['pnl'])}")
     lines += [
-        "", f"Total P&L: {_fmt_rupees(summary['total_pnl'])}", "",
+        "", f"Total P&L: {_fmt_rupees(sum(r['pnl'] for r in live_rows))}", "",
         _DISCLAIMER, f"Interested? Reach out — {user.email}",
     ]
     return "\n".join(lines)
@@ -197,9 +208,25 @@ def _render_email(user: User, summary: dict[str, Any]) -> tuple[str, str, str]:
     )
 
     x_post = _render_x_post(user, summary)
-    x_post_html_escaped = (
-        x_post.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\n", "<br>")
-    )
+    if x_post is not None:
+        x_post_html_escaped = (
+            x_post.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\n", "<br>")
+        )
+        x_post_html_block = (
+            "<hr>"
+            "<p><strong>📋 Copy below to post on X:</strong></p>"
+            "<div style='background:#f5f5f5;border:1px solid #ccc;border-radius:6px;padding:12px;"
+            "font-family:monospace;font-size:13px;line-height:1.5'>"
+            + x_post_html_escaped +
+            "</div>"
+        )
+        x_post_text_block = "\n\n--- Copy below to post on X ---\n" + x_post + "\n--- End ---"
+    else:
+        # Nothing traded LIVE today (paper instances may still have) --
+        # no genuine post to offer, so the section is left out entirely
+        # rather than showing an empty or misleading zero.
+        x_post_html_block = ""
+        x_post_text_block = ""
 
     html_body = (
         f"<h3>Daily Strategy Summary — {date_str}</h3>"
@@ -211,12 +238,7 @@ def _render_email(user: User, summary: dict[str, Any]) -> tuple[str, str, str]:
         f"<p><strong>Total P&amp;L: {_fmt_rupees(summary['total_pnl'])}</strong></p>"
         + unpriced_notice
         + "".join(footer_lines_html)
-        + "<hr>"
-        + "<p><strong>📋 Copy below to post on X:</strong></p>"
-        + "<div style='background:#f5f5f5;border:1px solid #ccc;border-radius:6px;padding:12px;"
-        + "font-family:monospace;font-size:13px;line-height:1.5'>"
-        + x_post_html_escaped
-        + "</div>"
+        + x_post_html_block
     )
     text_body = (
         f"Daily Strategy Summary — {date_str}\n\n"
@@ -225,9 +247,7 @@ def _render_email(user: User, summary: dict[str, Any]) -> tuple[str, str, str]:
         + f"\n\nTotal P&L: {_fmt_rupees(summary['total_pnl'])}\n"
         + unpriced_notice_text
         + "\n" + "\n".join(footer_lines_text)
-        + "\n\n--- Copy below to post on X ---\n"
-        + x_post
-        + "\n--- End ---"
+        + x_post_text_block
     )
     return subject, html_body, text_body
 

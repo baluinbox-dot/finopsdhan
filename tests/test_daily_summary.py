@@ -296,10 +296,54 @@ def test_send_email_includes_a_copyable_x_post_block(db_session, monkeypatch):
 def test_render_x_post_marks_a_still_open_position(db_session, monkeypatch):
     _no_dhan(monkeypatch)
     user = _make_user(db_session, email="balu@example.com")
-    us = _make_instance(db_session, user, label="NIFTY Rolling")
+    us = _make_instance(db_session, user, label="NIFTY Rolling", mode=StrategyMode.LIVE)
     _add_run(db_session, us, started_at=_now(), status="open", realized_pnl=0.0)
 
     summary = build_user_daily_summary(db_session, user)
     x_post = daily_summary._render_x_post(user, summary)
 
     assert "NIFTY Rolling (open):" in x_post
+
+
+def test_x_post_is_omitted_entirely_when_only_paper_traded_today(db_session, monkeypatch):
+    """Balu's own plan: only one or two instances ever run live, everything
+    else is paper/testing -- a public "Personal Trades" post must never
+    include paper P&L, and a paper-only day has nothing genuine to post at
+    all (not even a live total of zero)."""
+    _no_dhan(monkeypatch)
+    user = _make_user(db_session, email="balu@example.com")
+    us = _make_instance(db_session, user, label="Paper Only Strategy", mode=StrategyMode.PAPER)
+    _add_run(db_session, us, started_at=_now(), status="closed", realized_pnl=250.0)
+
+    summary = build_user_daily_summary(db_session, user)
+    assert daily_summary._render_x_post(user, summary) is None
+
+    captured = {}
+
+    def _fake_send_email(to_email, subject, *, html_body, text_body):
+        captured.update(html_body=html_body, text_body=text_body)
+        return True
+
+    monkeypatch.setattr(daily_summary, "send_email", _fake_send_email)
+    send_daily_summary_email(db_session, user)
+
+    assert "Copy below to post on X" not in captured["text_body"]
+    assert "Copy below to post on X" not in captured["html_body"]
+    assert "Paper Only Strategy" in captured["text_body"]  # still shown in the normal table, just not the X block
+
+
+def test_x_post_includes_only_live_rows_and_a_live_only_total(db_session, monkeypatch):
+    _no_dhan(monkeypatch)
+    user = _make_user(db_session, email="balu@example.com")
+    live_us = _make_instance(db_session, user, label="Live Strategy", mode=StrategyMode.LIVE)
+    _add_run(db_session, live_us, started_at=_now(), status="closed", realized_pnl=500.0)
+    paper_us = _make_instance(db_session, user, label="Paper Strategy", mode=StrategyMode.PAPER, strategy_name="Test Strategy 2")
+    _add_run(db_session, paper_us, started_at=_now(), status="closed", realized_pnl=1000.0)
+
+    summary = build_user_daily_summary(db_session, user)
+    assert summary["total_pnl"] == 1500.0  # the normal email's total still includes both
+
+    x_post = daily_summary._render_x_post(user, summary)
+    assert "Live Strategy: ₹500" in x_post
+    assert "Paper Strategy" not in x_post
+    assert "Total P&L: ₹500" in x_post  # live-only total, not the combined 1500
