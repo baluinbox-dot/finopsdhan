@@ -139,6 +139,26 @@ _AUTOMATION_NOTE = "Fully Automated — No Manual Intervention"
 _DISCLAIMER = "Disclaimer : Personal Trades | For transparency only | No advice or recommendations."
 
 
+def _render_x_post(user: User, summary: dict[str, Any]) -> str:
+    """A condensed, copy-paste-ready version of the same summary for
+    posting to X/Twitter by hand -- same automation note, per-strategy
+    breakdown, total, and disclaimer as the full email, just without the
+    margin/mode columns (X has no room for them). A standard X post caps
+    out around 280 characters; with several active strategies this will
+    likely run past that -- Balu trims it himself or posts it as a short
+    thread, this just does the copying-the-numbers-together part for him."""
+    date_str = summary["date"].strftime("%d %b %Y")
+    lines = [f"Daily Strategy Summary — {date_str}", "", _AUTOMATION_NOTE, ""]
+    for r in summary["rows"]:
+        status_note = " (open)" if r["still_open"] else ""
+        lines.append(f"{r['label']}{status_note}: {_fmt_rupees(r['pnl'])}")
+    lines += [
+        "", f"Total P&L: {_fmt_rupees(summary['total_pnl'])}", "",
+        _DISCLAIMER, f"Interested? Reach out — {user.email}",
+    ]
+    return "\n".join(lines)
+
+
 def _render_email(user: User, summary: dict[str, Any]) -> tuple[str, str, str]:
     """(subject, html_body, text_body)."""
     date_str = summary["date"].strftime("%d %b %Y")
@@ -176,6 +196,11 @@ def _render_email(user: User, summary: dict[str, Any]) -> tuple[str, str, str]:
         if summary["any_unpriced"] else ""
     )
 
+    x_post = _render_x_post(user, summary)
+    x_post_html_escaped = (
+        x_post.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\n", "<br>")
+    )
+
     html_body = (
         f"<h3>Daily Strategy Summary — {date_str}</h3>"
         f"<p><strong>{_AUTOMATION_NOTE}</strong></p>"
@@ -186,6 +211,12 @@ def _render_email(user: User, summary: dict[str, Any]) -> tuple[str, str, str]:
         f"<p><strong>Total P&amp;L: {_fmt_rupees(summary['total_pnl'])}</strong></p>"
         + unpriced_notice
         + "".join(footer_lines_html)
+        + "<hr>"
+        + "<p><strong>📋 Copy below to post on X:</strong></p>"
+        + "<div style='background:#f5f5f5;border:1px solid #ccc;border-radius:6px;padding:12px;"
+        + "font-family:monospace;font-size:13px;line-height:1.5'>"
+        + x_post_html_escaped
+        + "</div>"
     )
     text_body = (
         f"Daily Strategy Summary — {date_str}\n\n"
@@ -194,6 +225,9 @@ def _render_email(user: User, summary: dict[str, Any]) -> tuple[str, str, str]:
         + f"\n\nTotal P&L: {_fmt_rupees(summary['total_pnl'])}\n"
         + unpriced_notice_text
         + "\n" + "\n".join(footer_lines_text)
+        + "\n\n--- Copy below to post on X ---\n"
+        + x_post
+        + "\n--- End ---"
     )
     return subject, html_body, text_body
 
