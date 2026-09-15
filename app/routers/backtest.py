@@ -75,8 +75,9 @@ UNDERLYING_CHOICES = ["NIFTY", "BANKNIFTY", "SENSEX"]
 
 # Same fixed backfill start the downloader itself uses (see
 # scripts/backtest/download_historical_data.py's _BACKFILL_START) -- the
-# earliest date any local data could possibly exist.
-EARLIEST_DATA_DATE = date(2024, 9, 4)
+# earliest date any local data could possibly exist. Keep in sync with
+# that constant -- moved back to 2024-01-01 on Balu's request 2026-09-15.
+EARLIEST_DATA_DATE = date(2024, 1, 1)
 
 
 def _now() -> datetime:

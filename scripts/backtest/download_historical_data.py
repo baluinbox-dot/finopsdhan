@@ -69,8 +69,15 @@ _CHUNK_DAYS = 40
 # would shift by one day on every future run, changing every chunk's
 # filename and defeating the whole "skip what's already on disk" resume
 # logic. Set once, left alone; only `today` (the end of the range) should
-# ever move forward on a later run.
-_BACKFILL_START = date(2024, 9, 4)
+# ever move forward on a later run. Moved back from 2024-09-04 to
+# 2024-01-01 on Balu's request 2026-09-15 -- changing this value shifts
+# every chunk boundary for the whole range (chunks are computed
+# sequentially from this date, not aligned to a calendar grid), so this
+# is a one-time change that requires a fresh full download, not something
+# to keep nudging casually. app.routers.backtest's EARLIEST_DATA_DATE
+# mirrors this value for the backtest form's own date-picker floor --
+# keep both in sync if this ever changes again.
+_BACKFILL_START = date(2024, 1, 1)
 
 # ATM itself (0) plus 30 strikes either side. Widened from the original
 # +-15 (2026-09-07) after real backtests of long-holding strategies
