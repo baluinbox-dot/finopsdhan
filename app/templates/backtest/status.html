@@ -65,6 +65,61 @@
     </div>
 </div>
 
+<div class="row g-3 mb-4">
+    <div class="col-md-6">
+        <h6 class="mb-2">Yearly Total</h6>
+        <div class="table-responsive">
+            <table class="table table-sm align-middle">
+                <thead>
+                    <tr>
+                        <th>Year</th>
+                        <th>Trades</th>
+                        <th>Win Rate</th>
+                        <th>P&L</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for row in yearly_breakdown %}
+                    <tr>
+                        <td>{{ row.period }}</td>
+                        <td>{{ row.trades }}</td>
+                        <td>{{ '%.1f'|format(row.win_rate) }}%</td>
+                        <td class="{{ 'text-success' if row.pnl >= 0 else 'text-danger' }}">₹{{ '{:,.0f}'.format(row.pnl) }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+    <div class="col-md-6">
+        <h6 class="mb-2">Monthly Total</h6>
+        <div class="table-responsive" style="max-height: 320px; overflow-y: auto;">
+            <table class="table table-sm align-middle">
+                <thead>
+                    <tr>
+                        <th>Month</th>
+                        <th>Trades</th>
+                        <th>Win Rate</th>
+                        <th>P&L</th>
+                        <th>Cumulative</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for row in monthly_breakdown %}
+                    <tr>
+                        <td>{{ row.period }}</td>
+                        <td>{{ row.trades }}</td>
+                        <td>{{ '%.1f'|format(row.win_rate) }}%</td>
+                        <td class="{{ 'text-success' if row.pnl >= 0 else 'text-danger' }}">₹{{ '{:,.0f}'.format(row.pnl) }}</td>
+                        <td class="{{ 'text-success' if row.cumulative >= 0 else 'text-danger' }}">₹{{ '{:,.0f}'.format(row.cumulative) }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
 <h5 class="mb-2">Trades ({{ total_trades }})</h5>
 <div class="table-responsive">
     <table class="table table-sm align-middle">

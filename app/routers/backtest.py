@@ -439,6 +439,43 @@ def backtest_submit(
     return RedirectResponse(url(f"/backtest/{strategy_id}/sweeps/{sweep_id}"), status_code=303)
 
 
+def _period_breakdown(trades: list[dict], period_len: int) -> list[dict]:
+    """Aggregate a completed run's trades by calendar month (period_len=7,
+    keyed "YYYY-MM") or year (period_len=4, keyed "YYYY") -- grouped by
+    each trade's closed_at, since that's when its P&L was actually
+    realized. Chronological order (oldest period first), with a running
+    cumulative P&L column so a long multi-year run's trajectory is
+    readable a period at a time instead of only as one combined total."""
+    buckets: dict[str, dict[str, float]] = {}
+    for t in trades:
+        key = t["closed_at"][:period_len]
+        b = buckets.setdefault(key, {"trades": 0, "wins": 0, "pnl": 0.0, "costs": 0.0, "stale": 0})
+        b["trades"] += 1
+        if t["realized_pnl"] > 0:
+            b["wins"] += 1
+        b["pnl"] += t["realized_pnl"]
+        b["costs"] += t["costs"]
+        if t["used_stale_price"]:
+            b["stale"] += 1
+
+    rows = []
+    cumulative = 0.0
+    for key in sorted(buckets):
+        b = buckets[key]
+        cumulative += b["pnl"]
+        rows.append({
+            "period": key,
+            "trades": b["trades"],
+            "wins": b["wins"],
+            "win_rate": (b["wins"] / b["trades"] * 100) if b["trades"] else 0.0,
+            "pnl": b["pnl"],
+            "costs": b["costs"],
+            "stale": b["stale"],
+            "cumulative": cumulative,
+        })
+    return rows
+
+
 @router.get("/{strategy_id}/runs/{run_id}")
 def backtest_status(
     request: Request, db: DbSession, current_user: CurrentUser, strategy_id: uuid.UUID, run_id: uuid.UUID,
@@ -461,6 +498,8 @@ def backtest_status(
     # the newest ones are what you'd check first.
     all_trades = list(reversed((run.result or {}).get("trades", [])))
     paged_trades, page, per_page, total_pages = _paginate(all_trades, page, per_page)
+    monthly_breakdown = _period_breakdown(all_trades, 7)
+    yearly_breakdown = _period_breakdown(all_trades, 4)
 
     return render(
         request,
@@ -471,6 +510,7 @@ def backtest_status(
             "paged_trades": paged_trades, "total_trades": len(all_trades),
             "page": page, "per_page": per_page, "total_pages": total_pages,
             "per_page_choices": ORDERS_PER_PAGE_CHOICES,
+            "monthly_breakdown": monthly_breakdown, "yearly_breakdown": yearly_breakdown,
         },
     )
 

@@ -379,6 +379,50 @@ def test_status_page_hides_another_users_run(client, db_session):
     assert resp.headers["location"] == f"/backtest/{strategy.id}"
 
 
+def _trade_on(iso_date: str, pnl: float) -> dict:
+    return {
+        "opened_at": f"{iso_date}T09:20:00+05:30", "closed_at": f"{iso_date}T14:45:00+05:30",
+        "reason": "evaluate_exit", "realized_pnl": pnl, "costs": 5.0, "legs_opened": 2, "used_stale_price": False,
+    }
+
+
+def test_status_page_shows_monthly_and_yearly_totals(client, db_session):
+    strategy = _publish_strategy(client, db_session)
+    user = _register_and_login(client, db_session, "trader@example.com")
+
+    trades = [
+        _trade_on("2024-01-05", 100.0), _trade_on("2024-01-19", -30.0),   # 2024-01: net 70
+        _trade_on("2024-02-02", 50.0),                                    # 2024-02: net 50 (2024 total: 120)
+        _trade_on("2025-03-10", -200.0), _trade_on("2025-03-11", 40.0),   # 2025-03: net -160 (2025 total: -160)
+    ]
+    run = BacktestRun(
+        user_id=user.id, strategy_id=strategy.id, underlying="NIFTY",
+        start_date=date(2024, 1, 1), end_date=date(2025, 3, 31), params={}, status="completed",
+        result={"trade_count": len(trades), "total_pnl": -40.0, "equity_curve": [], "trades": trades},
+    )
+    db_session.add(run)
+    db_session.commit()
+    db_session.refresh(run)
+
+    resp = client.get(f"/backtest/{strategy.id}/runs/{run.id}")
+    assert resp.status_code == 200
+    text = resp.text
+
+    # Yearly: 2024 net +120, 2025 net -160.
+    assert "2024" in text
+    assert "₹120" in text
+    assert "2025" in text
+    assert "₹-160" in text
+
+    # Monthly, with running cumulative: Jan (+70) -> Feb (+120 cumulative) -> Mar 2025 (-40 cumulative).
+    assert "2024-01" in text
+    assert "₹70" in text
+    assert "2024-02" in text
+    assert "2025-03" in text
+    # Cumulative after all months nets to the same -40 as total_pnl.
+    assert "-40" in text
+
+
 # --- deleting a saved run ---
 
 
