@@ -9,23 +9,22 @@ strategy keep behaving exactly as they do today.
 
 Per-leg rules (percent of that leg's own entry premium):
   - Stop-loss hit (premium rises to entry * (1 + leg_stop_loss_pct/100)):
-    close only that leg.
+    close only that leg. Its sibling (the other side at the same strike)
+    has its own stop trailed to cost (0% loss allowed from here) — see
+    `evaluate_leg_exits`.
   - Target hit (premium falls to entry * (1 - leg_target_pct/100)): close
-    only that leg.
-  - Either way, the sibling (the other side at the same strike) is left
-    completely untouched — it keeps running on its own unmodified
-    SL/target, entry-anchored, for as long as it's open. There is no
-    "trail sibling to cost" reaction to a sibling's stop-loss (an earlier
-    version of this strategy had one; removed on Balu's request 2026-09-15
-    — a lone survivor should just run its own numbers, nothing more).
-  - A pair/strike is *not* closed just because one side exits, nor — this
-    is the part that differs from a plain "leave it alone" — is a
-    surviving lone leg ever swept up by a later T/M/B roll once its
+    only that leg. The sibling is left completely untouched — no
+    cost-trail on a target hit, only on a stop-loss (moving to cost is
+    explicitly a stop-loss reaction, not a target one).
+  - A pair/strike is *not* closed just because one side exits, and — this
+    is the part that differs from a plain "leave it alone" — a surviving
+    lone leg (whether left untouched by a target hit, or trailed to cost
+    by a stop-loss) is never swept up by a later T/M/B roll once its
     strike leaves the window. It keeps running, completely decoupled from
-    window membership, until it hits its *own* SL/target (or the whole
-    run ends via the daily SL/target/end-time). Only a strike whose *both*
-    legs are still open when the window rolls past it closes as a normal
-    pair, exactly like the original strategy.
+    window membership, until it hits its *own* SL/target (cost-trailed or
+    not) or the whole run ends via the daily SL/target/end-time. Only a
+    strike whose *both* legs are still open when the window rolls past it
+    closes as a normal pair, exactly like the original strategy.
 
 T/M/B rolling itself works exactly like the original strategy — reaching
 the current Bottom shifts the window down (close the old Top pair, open a
@@ -148,14 +147,15 @@ class ThreePairRollingLegSLTargetStrategy(Strategy):
     description = (
         "The same Dynamic T-M-B 3-Pair Rolling window as the original 3-Pair Rolling "
         "strategy, but every CE and PE leg has its own stop-loss and target instead of "
-        "exiting only as a whole pair. One leg hitting its stop or target closes only that "
-        "leg — its sibling is untouched and keeps running on its own numbers, even after its "
-        "strike later rolls out of the T/M/B window; a lone survivor only ever closes on its "
-        "own SL/target (or the whole run ending). Only a still-fully-open pair rolls away "
-        "together, exactly like the original strategy. A combined daily stop-loss/target and "
-        "end time still close everything and stop the strategy for the day. Same optional "
-        "combined hedge as the original strategy, including re-hedging itself as spot nears "
-        "a hedge leg's own strike."
+        "exiting only as a whole pair. One leg hitting its stop closes only that leg and "
+        "trails its sibling's stop to cost; one leg hitting its target closes only that leg, "
+        "sibling untouched. Either way the survivor keeps running on its own numbers, even "
+        "after its strike later rolls out of the T/M/B window — a lone survivor only ever "
+        "closes on its own SL/target (or the whole run ending), never force-closed by a roll. "
+        "Only a still-fully-open pair rolls away together, exactly like the original strategy. "
+        "A combined daily stop-loss/target and end time still close everything and stop the "
+        "strategy for the day. Same optional combined hedge as the original strategy, "
+        "including re-hedging itself as spot nears a hedge leg's own strike."
     )
     default_params = {
         "underlying": "NIFTY",
@@ -293,11 +293,14 @@ class ThreePairRollingLegSLTargetStrategy(Strategy):
     # --- per-leg stop-loss / target ---
 
     def evaluate_leg_exits(self, ctx: StrategyContext, open_run_notes: dict[str, Any]) -> dict[str, Any] | None:
-        """Every open primary leg is checked against its own fixed,
-        entry-anchored SL/target — independent of every other leg, and
+        """Every open primary leg is checked against its own SL/target,
         independent of whether its strike is still one of the T/M/B
-        window's 3 active slots (see module docstring: no sibling
-        cost-trail, and no window-membership gating here)."""
+        window's 3 active slots (see module docstring). A stop-loss hit
+        closes only that leg and trails its sibling's stop to cost
+        (breakeven) — the sibling then keeps running independently on that
+        tightened stop, even past a later roll (see evaluate_rolls). A
+        target hit closes only that leg; the sibling is left completely
+        untouched either way (no cost-trail on a target hit)."""
         p = {**self.default_params, **ctx.params}
         legs = open_run_notes.get("legs") or []
         if not legs:
@@ -316,25 +319,39 @@ class ThreePairRollingLegSLTargetStrategy(Strategy):
             securities_by_segment.setdefault(leg["exchange_segment"], []).append(int(leg["security_id"]))
         quotes = fetch_quotes(ctx.dhan_client, securities_by_segment)
 
+        # Grouped by strike so a stop-loss hit can find its sibling (the
+        # other side of the same pair) to trail its stop to cost.
+        by_strike: dict[float, list[dict]] = {}
+        for leg in open_legs:
+            strike = _strike_of(leg)
+            if strike is not None:
+                by_strike.setdefault(strike, []).append(leg)
+
         close_ids: list[str] = []
         patch: dict[str, dict[str, Any]] = {}
 
-        for leg in open_legs:
-            sid = str(leg["security_id"])
-            quote = quotes.get((leg["exchange_segment"], sid))
-            if quote is None:
-                continue  # no fresh price this pass — leave it, retry next poll
-            premium = float(quote.get("last_price", 0))
-            entry_price = float(leg["price"])
-            sl_price = entry_price * (1 + sl_pct / 100)
-            target_price = entry_price * (1 - target_pct / 100)
+        for strike_legs in by_strike.values():
+            for leg in strike_legs:
+                sid = str(leg["security_id"])
+                quote = quotes.get((leg["exchange_segment"], sid))
+                if quote is None:
+                    continue  # no fresh price this pass — leave it, retry next poll
+                premium = float(quote.get("last_price", 0))
+                entry_price = float(leg["price"])
+                at_cost = bool((leg_state.get(sid) or {}).get("sl_at_cost"))
+                sl_price = entry_price if at_cost else entry_price * (1 + sl_pct / 100)
+                target_price = entry_price * (1 - target_pct / 100)
 
-            if premium >= sl_price:
-                close_ids.append(sid)
-                patch[sid] = {**patch.get(sid, {}), "closed_reason": "leg_sl"}
-            elif target_pct and premium <= target_price:
-                close_ids.append(sid)
-                patch[sid] = {**patch.get(sid, {}), "closed_reason": "leg_target"}
+                if premium >= sl_price:
+                    close_ids.append(sid)
+                    patch[sid] = {**patch.get(sid, {}), "closed_reason": "leg_sl"}
+                    sibling = next((s for s in strike_legs if s is not leg), None)
+                    if sibling is not None:
+                        sib_sid = str(sibling["security_id"])
+                        patch[sib_sid] = {**patch.get(sib_sid, {}), "sl_at_cost": True}
+                elif target_pct and premium <= target_price:
+                    close_ids.append(sid)
+                    patch[sid] = {**patch.get(sid, {}), "closed_reason": "leg_target"}
 
         if not close_ids:
             return None

@@ -235,7 +235,7 @@ def _quote_response(prices: dict[str, float]) -> dict:
 # --- per-leg stop-loss / target ---
 
 
-def test_ce_leg_sl_closes_only_ce_sibling_untouched():
+def test_ce_leg_sl_closes_only_ce_and_moves_pe_to_cost():
     strategy = ThreePairRollingLegSLTargetStrategy()
     dhan = MagicMock()
     # CE entry 100, SL 25% -> SL price 125. Current CE premium 130 -> hit.
@@ -249,7 +249,7 @@ def test_ce_leg_sl_closes_only_ce_sibling_untouched():
     assert decision["close_security_ids"] == [_ce_id(24450)]
     patch_ = decision["leg_state_patch"]
     assert patch_[_ce_id(24450)] == {"closed_reason": "leg_sl"}
-    assert _pe_id(24450) not in patch_  # sibling's own SL/target is left completely unmodified (no cost-trail)
+    assert patch_[_pe_id(24450)] == {"sl_at_cost": True}
 
 
 def test_leg_target_closes_only_that_leg_no_cost_trail_on_sibling():
@@ -269,52 +269,50 @@ def test_leg_target_closes_only_that_leg_no_cost_trail_on_sibling():
     assert _pe_id(24450) not in patch_  # target hit does NOT trail the sibling's stop
 
 
-def test_sibling_survives_a_stop_loss_with_its_own_unmodified_stop():
-    """Once a leg's sibling has stopped out, this leg keeps running on its
-    own fixed, entry-anchored SL -- no cost-trail reaction at all (removed
-    on Balu's request 2026-09-15). A premium above entry but still below
-    its own 25% SL price must NOT close it."""
+def test_survivor_at_cost_closes_on_any_premium_rise_above_entry():
+    """After a sibling's SL trails this leg's stop to cost (0% loss
+    allowed), it must close as soon as its own premium is at or above its
+    own entry price — not wait for the full leg_stop_loss_pct threshold."""
     strategy = ThreePairRollingLegSLTargetStrategy()
     dhan = MagicMock()
-    # PE entry 100, own SL price 125 (25%). Premium 110 is above entry but
-    # nowhere near its own SL -- would have closed under the old cost-trail.
-    dhan.quote_data.return_value = _quote_response({_pe_id(24450): 110.0})
+    # PE entry 100, at cost -> SL price is just 100 (not 125). Premium 101 -> hit.
+    dhan.quote_data.return_value = _quote_response({_pe_id(24450): 101.0})
     notes = _window_notes()
-    notes["leg_state"] = {_ce_id(24450): {"status": "closed", "closed_reason": "leg_sl"}}
-    ctx = StrategyContext(dhan_client=dhan, params={"leg_stop_loss_pct": 25, "leg_target_pct": 80})
-
-    decision = strategy.evaluate_leg_exits(ctx, notes)
-
-    assert decision is None  # survives untouched -- its own SL is still 125, not trailed to cost
-
-
-def test_sibling_still_closes_once_it_crosses_its_own_full_stop_loss():
-    strategy = ThreePairRollingLegSLTargetStrategy()
-    dhan = MagicMock()
-    dhan.quote_data.return_value = _quote_response({_pe_id(24450): 130.0})
-    notes = _window_notes()
-    notes["leg_state"] = {_ce_id(24450): {"status": "closed", "closed_reason": "leg_sl"}}
+    notes["leg_state"] = {_ce_id(24450): {"status": "closed", "closed_reason": "leg_sl"}, _pe_id(24450): {"sl_at_cost": True}}
     ctx = StrategyContext(dhan_client=dhan, params={"leg_stop_loss_pct": 25, "leg_target_pct": 80})
 
     decision = strategy.evaluate_leg_exits(ctx, notes)
 
     assert decision is not None
     assert decision["close_security_ids"] == [_pe_id(24450)]
-    assert decision["leg_state_patch"][_pe_id(24450)] == {"closed_reason": "leg_sl"}
+
+
+def test_survivor_at_cost_does_not_close_below_entry():
+    strategy = ThreePairRollingLegSLTargetStrategy()
+    dhan = MagicMock()
+    # PE entry 100, at cost -> SL price 100. Premium 95 is a profit, still below cost -> no close.
+    dhan.quote_data.return_value = _quote_response({_pe_id(24450): 95.0})
+    notes = _window_notes()
+    notes["leg_state"] = {_ce_id(24450): {"status": "closed", "closed_reason": "leg_sl"}, _pe_id(24450): {"sl_at_cost": True}}
+    ctx = StrategyContext(dhan_client=dhan, params={"leg_stop_loss_pct": 25, "leg_target_pct": 80})
+
+    decision = strategy.evaluate_leg_exits(ctx, notes)
+
+    assert decision is None
 
 
 def test_leg_exits_still_monitored_after_its_strike_rolls_out_of_the_window():
-    """A leg's own SL/target must keep firing even once leg_state says it's
-    out of the T/M/B window (in_window: False, patched by a roll) -- window
-    membership only ever affects evaluate_rolls's boundary math, never
-    per-leg SL/target monitoring."""
+    """A leg's own SL/target (cost-trailed or not) must keep firing even
+    once leg_state says it's out of the T/M/B window (in_window: False,
+    patched by a roll) -- window membership only ever affects
+    evaluate_rolls's boundary math, never per-leg SL/target monitoring."""
     strategy = ThreePairRollingLegSLTargetStrategy()
     dhan = MagicMock()
-    dhan.quote_data.return_value = _quote_response({_pe_id(24450): 130.0})
+    dhan.quote_data.return_value = _quote_response({_pe_id(24450): 101.0})
     notes = _window_notes()
     notes["leg_state"] = {
         _ce_id(24450): {"status": "closed", "closed_reason": "leg_sl", "in_window": False},
-        _pe_id(24450): {"in_window": False},
+        _pe_id(24450): {"in_window": False, "sl_at_cost": True},
     }
     ctx = StrategyContext(dhan_client=dhan, params={"leg_stop_loss_pct": 25, "leg_target_pct": 80})
 

@@ -111,8 +111,8 @@
                 </select>
                 <div class="form-text">
                     Applies to each CE/PE leg's own entry premium. When one leg hits its stop, only that leg
-                    closes — its sibling (the other side of the same pair) is completely untouched and keeps
-                    running on its own unmodified stop/target.
+                    closes — its sibling (the other side of the same pair) has its own stop trailed to cost (0%
+                    loss allowed from then on) and keeps running independently on that tightened stop.
                 </div>
             </div>
             <div class="col-md-6">
@@ -122,15 +122,16 @@
                     <option value="80" {{ 'selected' if params.leg_target_pct | int == 80 else '' }}>80%</option>
                 </select>
                 <div class="form-text">
-                    When one leg hits its own target, only that leg closes — its sibling keeps running untouched,
-                    same as on a stop-loss.
+                    When one leg hits its own target, only that leg closes — its sibling keeps running completely
+                    untouched (no cost-trail on a target hit, only on a stop-loss).
                 </div>
             </div>
             <div class="col-12 small text-body-secondary">
-                A pair's T/M/B slot is never closed just because one side exits — and a lone survivor is never
-                swept up by a later roll either, even after its strike moves out of the window. It keeps running
-                until its own stop/target fires, or the whole run ends. Only a strike whose both legs are still
-                open when the window rolls past it closes away as a pair.
+                A pair's T/M/B slot is never closed just because one side exits — and a lone survivor (untouched
+                after a target hit, or trailed to cost after a stop-loss) is never swept up by a later roll
+                either, even after its strike moves out of the window. It keeps running until its own stop/target
+                fires, or the whole run ends. Only a strike whose both legs are still open when the window rolls
+                past it closes away as a pair.
             </div>
 
             <div class="col-12"><hr></div>
