@@ -97,6 +97,12 @@
 {% endif %}
 
 <a href="{{ url('/backtest/' ~ strategy.id) }}" class="btn btn-link ps-0">← Back to Backtest</a>
+{% if run.status not in ('queued', 'running') %}
+<form method="post" action="{{ url('/backtest/' ~ strategy.id ~ '/runs/' ~ run.id ~ '/delete') }}"
+      class="d-inline" onsubmit="return confirm('Delete this backtest run?');">
+    <button class="btn btn-outline-danger btn-sm" type="submit">Delete Run</button>
+</form>
+{% endif %}
 {% endblock %}
 
 {% block scripts %}

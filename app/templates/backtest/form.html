@@ -147,7 +147,15 @@
                     {% elif run.status == 'running' %}<span class="badge text-bg-primary">Running</span>
                     {% else %}<span class="badge text-bg-secondary">Queued</span>{% endif %}
                 </td>
-                <td><a href="{{ url('/backtest/' ~ strategy.id ~ '/runs/' ~ run.id) }}" class="btn btn-outline-secondary btn-sm">View</a></td>
+                <td class="text-nowrap">
+                    <a href="{{ url('/backtest/' ~ strategy.id ~ '/runs/' ~ run.id) }}" class="btn btn-outline-secondary btn-sm">View</a>
+                    {% if run.status not in ('queued', 'running') %}
+                    <form method="post" action="{{ url('/backtest/' ~ strategy.id ~ '/runs/' ~ run.id ~ '/delete') }}"
+                          class="d-inline" onsubmit="return confirm('Delete this backtest run?');">
+                        <button class="btn btn-outline-danger btn-sm" type="submit" title="Delete">Delete</button>
+                    </form>
+                    {% endif %}
+                </td>
             </tr>
             {% endfor %}
         </tbody>

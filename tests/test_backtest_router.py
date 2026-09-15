@@ -316,3 +316,97 @@ def test_status_page_hides_another_users_run(client, db_session):
     resp = client.get(f"/backtest/{strategy.id}/runs/{run.id}", follow_redirects=False)
     assert resp.status_code == 303
     assert resp.headers["location"] == f"/backtest/{strategy.id}"
+
+
+# --- deleting a saved run ---
+
+
+def test_delete_removes_a_completed_run(client, db_session):
+    strategy = _publish_strategy(client, db_session)
+    user = _register_and_login(client, db_session, "trader@example.com")
+
+    run = BacktestRun(
+        user_id=user.id, strategy_id=strategy.id, underlying="NIFTY",
+        start_date=date(2024, 9, 4), end_date=date(2024, 10, 4), params={}, status="completed",
+        result={"trade_count": 0, "total_pnl": 0.0, "equity_curve": [], "trades": []},
+    )
+    db_session.add(run)
+    db_session.commit()
+    run_id = run.id
+
+    resp = client.post(f"/backtest/{strategy.id}/runs/{run_id}/delete", follow_redirects=False)
+    assert resp.status_code == 303
+    assert resp.headers["location"] == f"/backtest/{strategy.id}"
+    assert db_session.get(BacktestRun, run_id) is None
+
+
+def test_delete_removes_a_failed_run(client, db_session):
+    strategy = _publish_strategy(client, db_session)
+    user = _register_and_login(client, db_session, "trader@example.com")
+
+    run = BacktestRun(
+        user_id=user.id, strategy_id=strategy.id, underlying="NIFTY",
+        start_date=date(2024, 9, 4), end_date=date(2024, 10, 4), params={}, status="failed",
+        error_message="boom",
+    )
+    db_session.add(run)
+    db_session.commit()
+    run_id = run.id
+
+    client.post(f"/backtest/{strategy.id}/runs/{run_id}/delete", follow_redirects=False)
+    assert db_session.get(BacktestRun, run_id) is None
+
+
+def test_delete_refuses_a_queued_run(client, db_session):
+    strategy = _publish_strategy(client, db_session)
+    user = _register_and_login(client, db_session, "trader@example.com")
+
+    run = BacktestRun(
+        user_id=user.id, strategy_id=strategy.id, underlying="NIFTY",
+        start_date=date(2024, 9, 4), end_date=date(2024, 10, 4), params={}, status="queued",
+    )
+    db_session.add(run)
+    db_session.commit()
+    run_id = run.id
+
+    resp = client.post(f"/backtest/{strategy.id}/runs/{run_id}/delete", follow_redirects=False)
+    assert resp.status_code == 303
+    assert resp.headers["location"] == f"/backtest/{strategy.id}/runs/{run_id}"
+    assert db_session.get(BacktestRun, run_id) is not None  # not deleted
+
+
+def test_delete_refuses_a_running_run(client, db_session):
+    strategy = _publish_strategy(client, db_session)
+    user = _register_and_login(client, db_session, "trader@example.com")
+
+    run = BacktestRun(
+        user_id=user.id, strategy_id=strategy.id, underlying="NIFTY",
+        start_date=date(2024, 9, 4), end_date=date(2024, 10, 4), params={}, status="running",
+        started_at=datetime.now(timezone.utc), pid=99999,
+    )
+    db_session.add(run)
+    db_session.commit()
+    run_id = run.id
+
+    client.post(f"/backtest/{strategy.id}/runs/{run_id}/delete", follow_redirects=False)
+    assert db_session.get(BacktestRun, run_id) is not None  # not deleted
+
+
+def test_delete_refuses_another_users_run(client, db_session):
+    strategy = _publish_strategy(client, db_session)
+    owner = _register_and_login(client, db_session, "first@example.com")
+
+    run = BacktestRun(
+        user_id=owner.id, strategy_id=strategy.id, underlying="NIFTY",
+        start_date=date(2024, 9, 4), end_date=date(2024, 10, 4), params={}, status="completed",
+        result={"trade_count": 0, "total_pnl": 0.0, "equity_curve": [], "trades": []},
+    )
+    db_session.add(run)
+    db_session.commit()
+    run_id = run.id
+
+    _register_and_login(client, db_session, "second@example.com")
+    resp = client.post(f"/backtest/{strategy.id}/runs/{run_id}/delete", follow_redirects=False)
+    assert resp.status_code == 303
+    assert resp.headers["location"] == f"/backtest/{strategy.id}"
+    assert db_session.get(BacktestRun, run_id) is not None  # not deleted, not the owner

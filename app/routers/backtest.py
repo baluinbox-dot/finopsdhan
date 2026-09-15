@@ -463,6 +463,31 @@ def backtest_status(
     )
 
 
+@router.post("/{strategy_id}/runs/{run_id}/delete")
+def delete_backtest_run(
+    request: Request, db: DbSession, current_user: CurrentUser, strategy_id: uuid.UUID, run_id: uuid.UUID,
+):
+    """Permanently remove one saved backtest run. Owner-only (no admin
+    override, unlike the view route) -- matches delete_instance/delete_note.
+    Blocked while still queued/running: those rows are tracked by
+    pid/lock bookkeeping the scheduler depends on (_reap_stale_runs /
+    advance_backtest_queue) and deleting one out from under that would
+    leave a dangling subprocess or a stuck lock."""
+    run = db.get(BacktestRun, run_id)
+    if run is None or run.strategy_id != strategy_id or run.user_id != current_user.id:
+        flash(request, "Backtest run not found.", "error")
+        return RedirectResponse(url(f"/backtest/{strategy_id}"), status_code=303)
+
+    if run.status in ("queued", "running"):
+        flash(request, "Can't delete a backtest that's still queued or running — wait for it to finish.", "error")
+        return RedirectResponse(url(f"/backtest/{strategy_id}/runs/{run_id}"), status_code=303)
+
+    db.delete(run)
+    db.commit()
+    flash(request, "Backtest run deleted.", "success")
+    return RedirectResponse(url(f"/backtest/{strategy_id}"), status_code=303)
+
+
 @router.get("/{strategy_id}/sweeps/{sweep_id}")
 def backtest_sweep_status(
     request: Request, db: DbSession, current_user: CurrentUser, strategy_id: uuid.UUID, sweep_id: uuid.UUID,
