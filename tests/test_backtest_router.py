@@ -66,6 +66,20 @@ def test_backtest_form_rejects_a_strategy_not_backtest_ready(client, db_session)
     assert resp.headers["location"] == "/strategies"
 
 
+def test_backtest_form_rejects_iron_fly_adjustments(client, db_session):
+    """Removed from BACKTEST_READY_STRATEGIES on Balu's request 2026-09-15
+    -- it holds across a full week by design and its wing legs routinely
+    drift outside the downloaded strike band, so its backtests come back
+    heavily stale and were getting confused with the intraday rolling
+    strategies' own results."""
+    strategy = _publish_strategy(client, db_session, code_ref="iron_fly_adjustments")
+    _register_and_login(client, db_session, "trader@example.com")
+
+    resp = client.get(f"/backtest/{strategy.id}", follow_redirects=False)
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/strategies"
+
+
 def test_backtest_form_renders_for_a_ready_strategy(client, db_session):
     strategy = _publish_strategy(client, db_session)
     _register_and_login(client, db_session, "trader@example.com")

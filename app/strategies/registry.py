@@ -57,6 +57,15 @@ RICH_CONFIG_STRATEGIES: set[str] = {
 #     as iron_fly_adjustments (already wired into the engine) but hasn't
 #     itself been run against real data yet -- Balu's own call to focus on
 #     RSI Call Writing first.
+#   - iron_fly_adjustments: removed from here on Balu's request 2026-09-15
+#     -- it holds across a full week by design (never same-day), and its
+#     wing legs routinely drift outside the downloaded strike band over a
+#     multi-day hold, so most of its backtest runs come back heavily
+#     "stale" (see app.backtest.engine's stale-price fallback). Still a
+#     real live/paper strategy (RICH_CONFIG_STRATEGIES below, unaffected)
+#     -- only its Backtest button is gone, to stop it from being confused
+#     with the intraday rolling strategies during backtest work. Re-add
+#     once its data situation is revisited.
 #   - example_short_strangle: the seeded demo strategy, not a real one.
 # Add a code_ref here only after it's actually been validated the same
 # way every strategy above it was (real local data, sane trade count, no
@@ -66,7 +75,6 @@ BACKTEST_READY_STRATEGIES: set[str] = {
     "three_pair_rolling",
     "three_pair_rolling_leg_sl_target",
     "single_leg_seller_hedge",
-    "iron_fly_adjustments",
     "dynamic_strangle",
     "rsi_call_writing",
 }
