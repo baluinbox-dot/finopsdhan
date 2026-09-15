@@ -49,6 +49,7 @@ from sqlalchemy import or_, select
 from app.config import get_settings
 from app.deps import CurrentUser, DbSession
 from app.models import BacktestRun, Strategy, UserRole, UserStrategy
+from app.routers.dashboard import ORDERS_PER_PAGE_CHOICES, ORDERS_PER_PAGE_DEFAULT, _paginate
 from app.strategies.registry import BACKTEST_READY_STRATEGIES, get_strategy_class
 from app.templating import flash, render, url
 
@@ -441,6 +442,7 @@ def backtest_submit(
 @router.get("/{strategy_id}/runs/{run_id}")
 def backtest_status(
     request: Request, db: DbSession, current_user: CurrentUser, strategy_id: uuid.UUID, run_id: uuid.UUID,
+    page: int = 1, per_page: int = ORDERS_PER_PAGE_DEFAULT,
 ):
     strategy, redirect = _load_strategy_or_redirect(db, request, strategy_id)
     if redirect:
@@ -454,12 +456,21 @@ def backtest_status(
 
     equity_curve_json = json.dumps((run.result or {}).get("equity_curve", []))
 
+    # Most-recent-first, same convention as the Dashboard's Closed Orders --
+    # a long-running strategy's trade list can run into the hundreds, and
+    # the newest ones are what you'd check first.
+    all_trades = list(reversed((run.result or {}).get("trades", [])))
+    paged_trades, page, per_page, total_pages = _paginate(all_trades, page, per_page)
+
     return render(
         request,
         "backtest/status.html",
         {
             "current_user": current_user, "strategy": strategy, "run": run,
             "equity_curve_json": equity_curve_json,
+            "paged_trades": paged_trades, "total_trades": len(all_trades),
+            "page": page, "per_page": per_page, "total_pages": total_pages,
+            "per_page_choices": ORDERS_PER_PAGE_CHOICES,
         },
     )
 

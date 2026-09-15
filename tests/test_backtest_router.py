@@ -282,6 +282,53 @@ def test_status_page_renders_for_a_completed_run(client, db_session, tmp_path):
     assert "evaluate_exit" in resp.text
 
 
+def _trade(day: int, pnl: float = 10.0) -> dict:
+    return {
+        "opened_at": f"2024-09-{day:02d}T09:20:00+05:30", "closed_at": f"2024-09-{day:02d}T14:45:00+05:30",
+        "reason": "evaluate_exit", "realized_pnl": pnl, "costs": 5.0, "legs_opened": 2, "used_stale_price": False,
+    }
+
+
+def test_status_page_paginates_trades_most_recent_first(client, db_session):
+    strategy = _publish_strategy(client, db_session)
+    user = _register_and_login(client, db_session, "trader@example.com")
+
+    trades = [_trade(day) for day in range(1, 26)]  # 25 trades, days 1..25
+    run = BacktestRun(
+        user_id=user.id, strategy_id=strategy.id, underlying="NIFTY",
+        start_date=date(2024, 9, 1), end_date=date(2024, 9, 25), params={}, status="completed",
+        result={"trade_count": 25, "total_pnl": 250.0, "equity_curve": [], "trades": trades},
+    )
+    db_session.add(run)
+    db_session.commit()
+    db_session.refresh(run)
+
+    # Default page size (10) -> page 1 shows the 10 most recent (days 25..16).
+    # Note: the page header always shows the run's own date range
+    # ("2024-09-01 -> 2024-09-25"), and each same-day trade's date appears
+    # twice in its row (Opened + Closed columns) -- every check below
+    # counts occurrences to isolate the trades table from that header line.
+    resp = client.get(f"/backtest/{strategy.id}/runs/{run.id}")
+    assert resp.status_code == 200
+    assert "Trades (25)" in resp.text
+    assert resp.text.count("2024-09-16") == 2  # this trade's row (opened + closed)
+    assert "2024-09-15" not in resp.text
+    assert "Showing 1 to 10 of 25 trades" in resp.text
+    assert "Page 1 of 3" in resp.text
+
+    # Page 2 -> next 10 (days 15..6).
+    resp2 = client.get(f"/backtest/{strategy.id}/runs/{run.id}?page=2")
+    assert resp2.text.count("2024-09-15") == 2
+    assert resp2.text.count("2024-09-06") == 2
+    assert resp2.text.count("2024-09-25") == 1  # header only -- not on this page's trades
+
+    # per_page=50 -> everything on one page.
+    resp3 = client.get(f"/backtest/{strategy.id}/runs/{run.id}?per_page=50")
+    assert "Page 1 of 1" in resp3.text
+    assert resp3.text.count("2024-09-01") == 3  # header + this trade's row (opened + closed)
+    assert resp3.text.count("2024-09-25") == 3
+
+
 def test_status_page_renders_for_a_failed_run(client, db_session):
     strategy = _publish_strategy(client, db_session)
     user = _register_and_login(client, db_session, "trader@example.com")
