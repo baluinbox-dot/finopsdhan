@@ -672,6 +672,7 @@ def configure_rolling_submit(
     daily_target: float = Form(15000),
     hedge_enabled: bool = Form(False),
     hedge_premium_target: float = Form(5),
+    hedge_reentry_buffer: float = Form(50),
     order_type: str = Form("LIMIT"),
     live_confirmed: bool = Form(False),
     mode: str = Form("paper"),
@@ -717,6 +718,7 @@ def configure_rolling_submit(
         "daily_target": daily_target,
         "hedge_enabled": hedge_enabled,
         "hedge_premium_target": hedge_premium_target,
+        "hedge_reentry_buffer": hedge_reentry_buffer,
         "order_type": "MARKET" if order_type == "MARKET" else "LIMIT",
     }
 
@@ -1089,6 +1091,7 @@ def configure_rolling_legsl_submit(
     daily_target: float = Form(15000),
     hedge_enabled: bool = Form(False),
     hedge_premium_target: float = Form(5),
+    hedge_reentry_buffer: float = Form(50),
     order_type: str = Form("LIMIT"),
     live_confirmed: bool = Form(False),
     mode: str = Form("paper"),
@@ -1153,6 +1156,7 @@ def configure_rolling_legsl_submit(
         "daily_target": daily_target,
         "hedge_enabled": hedge_enabled,
         "hedge_premium_target": hedge_premium_target,
+        "hedge_reentry_buffer": hedge_reentry_buffer,
         "order_type": "MARKET" if order_type == "MARKET" else "LIMIT",
     }
 

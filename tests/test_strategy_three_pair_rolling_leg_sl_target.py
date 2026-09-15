@@ -235,7 +235,7 @@ def _quote_response(prices: dict[str, float]) -> dict:
 # --- per-leg stop-loss / target ---
 
 
-def test_ce_leg_sl_closes_only_ce_and_moves_pe_to_cost():
+def test_ce_leg_sl_closes_only_ce_sibling_untouched():
     strategy = ThreePairRollingLegSLTargetStrategy()
     dhan = MagicMock()
     # CE entry 100, SL 25% -> SL price 125. Current CE premium 130 -> hit.
@@ -249,7 +249,7 @@ def test_ce_leg_sl_closes_only_ce_and_moves_pe_to_cost():
     assert decision["close_security_ids"] == [_ce_id(24450)]
     patch_ = decision["leg_state_patch"]
     assert patch_[_ce_id(24450)] == {"closed_reason": "leg_sl"}
-    assert patch_[_pe_id(24450)] == {"sl_at_cost": True}
+    assert _pe_id(24450) not in patch_  # sibling's own SL/target is left completely unmodified (no cost-trail)
 
 
 def test_leg_target_closes_only_that_leg_no_cost_trail_on_sibling():
@@ -269,16 +269,53 @@ def test_leg_target_closes_only_that_leg_no_cost_trail_on_sibling():
     assert _pe_id(24450) not in patch_  # target hit does NOT trail the sibling's stop
 
 
-def test_survivor_at_cost_closes_on_any_premium_rise_above_entry():
-    """After a sibling's SL trails this leg's stop to cost (0% loss
-    allowed), it must close as soon as its own premium is at or above its
-    own entry price — not wait for the full leg_stop_loss_pct threshold."""
+def test_sibling_survives_a_stop_loss_with_its_own_unmodified_stop():
+    """Once a leg's sibling has stopped out, this leg keeps running on its
+    own fixed, entry-anchored SL -- no cost-trail reaction at all (removed
+    on Balu's request 2026-09-15). A premium above entry but still below
+    its own 25% SL price must NOT close it."""
     strategy = ThreePairRollingLegSLTargetStrategy()
     dhan = MagicMock()
-    # PE entry 100, at cost -> SL price is just 100 (not 125). Premium 101 -> hit.
-    dhan.quote_data.return_value = _quote_response({_pe_id(24450): 101.0})
+    # PE entry 100, own SL price 125 (25%). Premium 110 is above entry but
+    # nowhere near its own SL -- would have closed under the old cost-trail.
+    dhan.quote_data.return_value = _quote_response({_pe_id(24450): 110.0})
     notes = _window_notes()
-    notes["leg_state"] = {_ce_id(24450): {"status": "closed", "closed_reason": "leg_sl"}, _pe_id(24450): {"sl_at_cost": True}}
+    notes["leg_state"] = {_ce_id(24450): {"status": "closed", "closed_reason": "leg_sl"}}
+    ctx = StrategyContext(dhan_client=dhan, params={"leg_stop_loss_pct": 25, "leg_target_pct": 80})
+
+    decision = strategy.evaluate_leg_exits(ctx, notes)
+
+    assert decision is None  # survives untouched -- its own SL is still 125, not trailed to cost
+
+
+def test_sibling_still_closes_once_it_crosses_its_own_full_stop_loss():
+    strategy = ThreePairRollingLegSLTargetStrategy()
+    dhan = MagicMock()
+    dhan.quote_data.return_value = _quote_response({_pe_id(24450): 130.0})
+    notes = _window_notes()
+    notes["leg_state"] = {_ce_id(24450): {"status": "closed", "closed_reason": "leg_sl"}}
+    ctx = StrategyContext(dhan_client=dhan, params={"leg_stop_loss_pct": 25, "leg_target_pct": 80})
+
+    decision = strategy.evaluate_leg_exits(ctx, notes)
+
+    assert decision is not None
+    assert decision["close_security_ids"] == [_pe_id(24450)]
+    assert decision["leg_state_patch"][_pe_id(24450)] == {"closed_reason": "leg_sl"}
+
+
+def test_leg_exits_still_monitored_after_its_strike_rolls_out_of_the_window():
+    """A leg's own SL/target must keep firing even once leg_state says it's
+    out of the T/M/B window (in_window: False, patched by a roll) -- window
+    membership only ever affects evaluate_rolls's boundary math, never
+    per-leg SL/target monitoring."""
+    strategy = ThreePairRollingLegSLTargetStrategy()
+    dhan = MagicMock()
+    dhan.quote_data.return_value = _quote_response({_pe_id(24450): 130.0})
+    notes = _window_notes()
+    notes["leg_state"] = {
+        _ce_id(24450): {"status": "closed", "closed_reason": "leg_sl", "in_window": False},
+        _pe_id(24450): {"in_window": False},
+    }
     ctx = StrategyContext(dhan_client=dhan, params={"leg_stop_loss_pct": 25, "leg_target_pct": 80})
 
     decision = strategy.evaluate_leg_exits(ctx, notes)
@@ -371,7 +408,11 @@ def test_roll_at_boundary_with_both_legs_already_leg_exited_still_opens_fresh_pa
     assert set(roll["leg_state_patch"]) == {_ce_id(24450), _pe_id(24450)}
 
 
-def test_roll_at_boundary_with_one_leg_still_open_closes_only_that_one():
+def test_roll_at_boundary_with_one_leg_still_open_leaves_the_survivor_running():
+    """Balu's request 2026-09-15: once a leg's sibling has already exited
+    independently (target/SL), the survivor is never swept up by a later
+    roll -- it keeps running solo on its own numbers even after its strike
+    rolls out of the window. Only a still-fully-open pair reverses together."""
     strategy = ThreePairRollingLegSLTargetStrategy()
     dhan = _mock_dhan_client(spot=24350.0)  # spot at B -> shift down, close T
     notes = _window_notes()
@@ -383,8 +424,12 @@ def test_roll_at_boundary_with_one_leg_still_open_closes_only_that_one():
 
     assert decision is not None
     roll = decision["rolls"][0]
-    assert roll["close_security_ids"] == [_pe_id(24450)]  # only the still-open sibling
+    assert roll["close_security_ids"] == []  # the surviving PE is left open, not reversed
     assert roll["allow_empty_close"] is True
+    # It's still marked out of the window (for T/M/B boundary bookkeeping)...
+    assert roll["leg_state_patch"][_pe_id(24450)] == {"in_window": False}
+    # ...but leg_state itself never says it's closed -- it stays genuinely open.
+    assert "status" not in roll["leg_state_patch"][_pe_id(24450)]
 
 
 def test_rolled_away_strike_does_not_count_toward_window_on_a_later_pass():
@@ -406,3 +451,101 @@ def test_rolled_away_strike_does_not_count_toward_window_on_a_later_pass():
     ctx = StrategyContext(dhan_client=dhan, params={"expiry": "2026-08-27", "strike_gap": 50})
     decision = strategy.evaluate_rolls(ctx, notes)
     assert decision is None  # spot inside window, nothing to do -- but crucially, no crash/misfire from a 4-strike window
+
+
+# --- hedge re-entry (same mechanics as the original strategy) ---
+
+_WIDE_STRIKES = list(range(23800, 25001, 50))  # wide enough to hold both the T/M/B window and roaming hedge strikes
+
+
+def _hedge_legs(ce_strike: int = 24200, pe_strike: int = 24600, quantity: int = 225) -> list[dict]:
+    return [
+        {"label": f"HEDGE BUY {ce_strike} CE", "security_id": _ce_id(ce_strike), "trading_symbol": f"NIFTY {ce_strike} CE 2026-08-27",
+         "exchange_segment": "NSE_FNO", "transaction_type": "BUY", "quantity": quantity, "order_type": "LIMIT",
+         "product_type": "INTRADAY", "price": 5.0, "role": "hedge"},
+        {"label": f"HEDGE BUY {pe_strike} PE", "security_id": _pe_id(pe_strike), "trading_symbol": f"NIFTY {pe_strike} PE 2026-08-27",
+         "exchange_segment": "NSE_FNO", "transaction_type": "BUY", "quantity": quantity, "order_type": "LIMIT",
+         "product_type": "INTRADAY", "price": 5.0, "role": "hedge"},
+    ]
+
+
+def _mock_dhan_client_custom_premiums(spot: float, pe_overrides: dict[int, float] | None = None, ce_overrides: dict[int, float] | None = None) -> MagicMock:
+    pe_overrides = pe_overrides or {}
+    ce_overrides = ce_overrides or {}
+    dhan = MagicMock()
+    dhan.expiry_list.return_value = {"status": "success", "data": {"status": "success", "data": ["2026-08-27"]}}
+    oc = {
+        f"{strike}.000000": {
+            "ce": {"security_id": _ce_id(strike), "last_price": ce_overrides.get(strike, 60.0), "greeks": {}},
+            "pe": {"security_id": _pe_id(strike), "last_price": pe_overrides.get(strike, 55.0), "greeks": {}},
+        }
+        for strike in _WIDE_STRIKES
+    }
+    dhan.option_chain.return_value = {"status": "success", "data": {"status": "success", "data": {"last_price": spot, "oc": oc}}}
+    dhan.ticker_data.return_value = {"status": "success", "data": {"status": "success", "data": {"IDX_I": {"13": {"last_price": spot}}}}}
+    return dhan
+
+
+def test_hedge_reentry_closes_and_reopens_pe_hedge_as_spot_approaches_its_strike():
+    strategy = ThreePairRollingLegSLTargetStrategy()
+    dhan = _mock_dhan_client_custom_premiums(
+        spot=24190.0,
+        pe_overrides={24150: 20.0, 24100: 12.0, 24050: 5.3},
+    )
+    ctx = StrategyContext(dhan_client=dhan, params={
+        "expiry": "2026-08-27", "strike_gap": 50,
+        "hedge_enabled": True, "hedge_premium_target": 5, "hedge_reentry_buffer": 50,
+    })
+
+    notes = _window_notes(b=24000, m=24050, t=25000)  # spot 24190 sits well inside -- no primary shift
+    notes["legs"] += _hedge_legs(ce_strike=24650, pe_strike=24150)
+
+    decision = strategy.evaluate_rolls(ctx, notes)
+
+    assert decision is not None
+    assert len(decision["rolls"]) == 1
+    roll = decision["rolls"][0]
+    assert roll["close_security_ids"] == [_pe_id(24150)]
+    new_leg = roll["new_legs"][0]
+    assert new_leg.role == "hedge"
+    assert new_leg.transaction_type == "BUY"
+    assert new_leg.quantity == 225
+    assert new_leg.trading_symbol == "NIFTY 24050 PE 2026-08-27"
+
+
+def test_hedge_reentry_disabled_when_buffer_is_zero():
+    strategy = ThreePairRollingLegSLTargetStrategy()
+    dhan = _mock_dhan_client_custom_premiums(spot=24190.0, pe_overrides={24050: 5.3})
+    ctx = StrategyContext(dhan_client=dhan, params={
+        "expiry": "2026-08-27", "strike_gap": 50,
+        "hedge_enabled": True, "hedge_premium_target": 5, "hedge_reentry_buffer": 0,
+    })
+
+    notes = _window_notes(b=24000, m=24050, t=25000)
+    notes["legs"] += _hedge_legs(ce_strike=24650, pe_strike=24150)
+
+    assert strategy.evaluate_rolls(ctx, notes) is None
+
+
+def test_hedge_reentry_never_touches_the_per_leg_sl_target_window():
+    """A hedge roll must never appear alongside, or be confused with, the
+    T/M/B window's own in_window bookkeeping -- the primary window here is
+    untouched (spot inside it) while only the hedge re-enters."""
+    strategy = ThreePairRollingLegSLTargetStrategy()
+    dhan = _mock_dhan_client_custom_premiums(
+        spot=24190.0,
+        pe_overrides={24150: 20.0, 24100: 12.0, 24050: 5.3},
+    )
+    ctx = StrategyContext(dhan_client=dhan, params={
+        "expiry": "2026-08-27", "strike_gap": 50,
+        "hedge_enabled": True, "hedge_premium_target": 5, "hedge_reentry_buffer": 50,
+    })
+
+    notes = _window_notes(b=24000, m=24050, t=25000)
+    notes["legs"] += _hedge_legs(ce_strike=24650, pe_strike=24150)
+
+    decision = strategy.evaluate_rolls(ctx, notes)
+
+    assert decision is not None
+    assert all(r["new_legs"][0].role == "hedge" for r in decision["rolls"])
+    assert not any("in_window" in r.get("leg_state_patch", {}) for r in decision["rolls"])

@@ -30,12 +30,22 @@ every other strategy here.
 An optional hedge (one CE buy + one PE buy, picked by nearest live premium
 to a target price, e.g. Rs 5 or Rs 10) protects the *combined* exposure of
 all three pairs at once — sized at `lots * 3`, since three pairs each
-sell `lots` on both sides. The hedge is bought once at entry and never
-rolls with the T/M/B window (`evaluate_rolls` only ever touches
-`role == "primary"` legs) — it sits fixed for the whole day and is closed,
-along with everything else, by the existing whole-position close path
-(`_close_open_run` in the engine), whether that's the daily SL/target, end
-time, or a manual Close Now.
+sell `lots` on both sides. Bought once at entry; from then on each side is
+independently re-hedged by `evaluate_rolls` as spot approaches it: once
+spot comes within `hedge_reentry_buffer` points of a hedge leg's own
+strike, that leg is closed and immediately replaced with a fresh
+same-side hedge, again picked by nearest live premium to
+`hedge_premium_target` from the *current* spot — naturally landing further
+away, since the old strike had gone from "far OTM and cheap" to "close to
+spot and expensive". This is entirely independent of the T/M/B window
+shifts above (hedge re-entry never touches `role == "primary"` legs, and a
+T/M/B shift never touches `role == "hedge"` legs); either can happen alone
+or both in the same poll. `hedge_reentry_buffer` set to 0 (or hedging
+disabled) keeps the original behavior — hedge fixed all day. Either way,
+any hedge still open at day's end is closed, along with everything else,
+by the existing whole-position close path (`_close_open_run` in the
+engine), whether that's the daily SL/target, end time, or a manual Close
+Now.
 """
 
 from __future__ import annotations
@@ -54,7 +64,15 @@ from app.dhan.helpers import (
     find_strike_by_nearest_premium,
     get_lot_size,
 )
-from app.strategies.base import OrderLeg, Strategy, StrategyContext, currently_open_legs, leg_pnl, resolve_order_type
+from app.strategies.base import (
+    OrderLeg,
+    Strategy,
+    StrategyContext,
+    currently_open_legs,
+    leg_option_type,
+    leg_pnl,
+    resolve_order_type,
+)
 
 IST = ZoneInfo("Asia/Kolkata")
 
@@ -100,7 +118,9 @@ class ThreePairRollingStrategy(Strategy):
         "are roles, not fixed strikes — the middle position is never touched by a shift, "
         "only relabeled. A single daily stop-loss/target (live mark-to-market across all "
         "three legs of the window) closes everything and stops the strategy for the rest "
-        "of the day, as does the configured end time. One entry per day."
+        "of the day, as does the configured end time. One entry per day. An optional hedge "
+        "can also re-hedge itself: as spot nears a hedge leg's own strike, that leg closes "
+        "and a fresh far-OTM hedge is bought in its place."
     )
     default_params = {
         "underlying": "NIFTY",
@@ -113,6 +133,7 @@ class ThreePairRollingStrategy(Strategy):
         "daily_target": 15000,
         "hedge_enabled": False,
         "hedge_premium_target": 5,  # buy the closest-premium CE/PE hedge to this price
+        "hedge_reentry_buffer": 50,  # spot within this many points of a hedge strike -> close it and buy a fresh one; 0 disables re-entry
         "order_type": "LIMIT",  # "LIMIT" (safe default) or "MARKET" (no price protection)
     }
 
@@ -295,37 +316,56 @@ class ThreePairRollingStrategy(Strategy):
             return None
 
         leg_state = open_run_notes.get("leg_state") or {}
+        open_legs_all = currently_open_legs(legs, leg_state)
 
         # Currently-open legs grouped by strike — the window should always
         # be exactly 3 strikes (B, M, T ascending), each with a CE+PE pair.
-        # Hedge legs are deliberately excluded: they're bought once at
-        # entry and never roll with the window (see module docstring).
         # currently_open_legs dedupes each security_id to its one genuinely
         # -open history entry first — this strategy's whole premise is
         # spot oscillating back and forth, so a strike it already closed
-        # earlier today is routinely revisited later the same run.
+        # earlier today is routinely revisited later the same run. Hedge
+        # legs are tracked separately (one per side) for the re-entry check
+        # below — they never join the B/M/T window.
         groups: dict[float, list[dict]] = {}
-        for leg in currently_open_legs(legs, leg_state):
-            if leg.get("role") != "primary":
-                continue
-            strike = _strike_of(leg)
-            if strike is None:
-                continue
-            groups.setdefault(strike, []).append(leg)
+        hedge_legs: dict[str, dict] = {}
+        for leg in open_legs_all:
+            if leg.get("role") == "primary":
+                strike = _strike_of(leg)
+                if strike is not None:
+                    groups.setdefault(strike, []).append(leg)
+            elif leg.get("role") == "hedge":
+                option_type = leg_option_type(leg)
+                if option_type:
+                    hedge_legs[option_type] = leg
 
         open_strikes = sorted(groups.keys())
-        if len(open_strikes) != 3:
-            return None  # not a clean B/M/T window right now — don't guess, leave it alone
-
-        b, m, t = open_strikes
+        window_ok = len(open_strikes) == 3
+        if window_ok:
+            b, m, t = open_strikes
         window: dict[float, list[dict]] = dict(groups)  # simulated state, updated as shifts are planned
 
         spot = fetch_spot_price(ctx.dhan_client, meta["exchange_segment"], meta["security_id"])
         if spot is None:
             return None
 
-        if b < spot < t:
-            return None  # comfortably inside the window — skip the chain fetch entirely
+        # A hedge leg is "due" for re-entry once spot has closed to within
+        # `hedge_reentry_buffer` points of that leg's own strike — at that
+        # point it's no longer the cheap far-OTM hedge it was bought as.
+        hedge_buffer = float(p.get("hedge_reentry_buffer") or 0)
+        hedge_due: dict[str, dict] = {}
+        if p.get("hedge_enabled") and hedge_buffer > 0:
+            for option_type, leg in hedge_legs.items():
+                strike = _strike_of(leg)
+                if strike is None:
+                    continue
+                if option_type == "PE" and strike <= spot and (spot - strike) <= hedge_buffer:
+                    hedge_due[option_type] = leg
+                elif option_type == "CE" and strike >= spot and (strike - spot) <= hedge_buffer:
+                    hedge_due[option_type] = leg
+
+        primary_shift_needed = window_ok and not (b < spot < t)
+        if not primary_shift_needed and not hedge_due:
+            return None  # nothing to do — skip the chain fetch entirely
 
         chain_df, _ = fetch_chain_df(
             ctx.dhan_client,
@@ -348,51 +388,86 @@ class ThreePairRollingStrategy(Strategy):
 
         rolls: list[dict[str, Any]] = []
 
-        for _ in range(_MAX_SHIFTS_PER_PASS):
-            if spot <= b:
-                target = _nearest_strike(strikes_avail, b - gap)
-                closing_strike, role = t, "B"
-            elif spot >= t:
-                target = _nearest_strike(strikes_avail, t + gap)
-                closing_strike, role = b, "T"
-            else:
-                break  # spot has settled back inside the (possibly already-shifted) window
+        if primary_shift_needed:
+            for _ in range(_MAX_SHIFTS_PER_PASS):
+                if spot <= b:
+                    target = _nearest_strike(strikes_avail, b - gap)
+                    closing_strike, role = t, "B"
+                elif spot >= t:
+                    target = _nearest_strike(strikes_avail, t + gap)
+                    closing_strike, role = b, "T"
+                else:
+                    break  # spot has settled back inside the (possibly already-shifted) window
 
-            if target in window:
-                # Structurally shouldn't happen (target is always exactly
-                # `gap` beyond the current boundary, distinct from the
-                # other two open strikes) — if it does, something's off
-                # with the chain data; stop shifting rather than guess.
-                break
-            row = _row(target)
-            if row is None:
-                break  # no valid contract at the target strike — stop here, retry next poll
+                if target in window:
+                    # Structurally shouldn't happen (target is always exactly
+                    # `gap` beyond the current boundary, distinct from the
+                    # other two open strikes) — if it does, something's off
+                    # with the chain data; stop shifting rather than guess.
+                    break
+                row = _row(target)
+                if row is None:
+                    break  # no valid contract at the target strike — stop here, retry next poll
 
-            closing_legs = window.pop(closing_strike)
-            quantity = closing_legs[0]["quantity"]
-            new_legs = [
-                OrderLeg(
-                    label=f"{role} SELL {int(target)} CE ({expiry})", security_id=str(row["ce_security_id"]),
-                    trading_symbol=f"{underlying} {int(target)} CE {expiry}", exchange_segment=meta["option_segment"],
-                    transaction_type="SELL", quantity=quantity, order_type=order_type, product_type="INTRADAY",
-                    price=float(row["ce_ltp"]), role="primary",
-                ),
-                OrderLeg(
-                    label=f"{role} SELL {int(target)} PE ({expiry})", security_id=str(row["pe_security_id"]),
-                    trading_symbol=f"{underlying} {int(target)} PE {expiry}", exchange_segment=meta["option_segment"],
-                    transaction_type="SELL", quantity=quantity, order_type=order_type, product_type="INTRADAY",
-                    price=float(row["pe_ltp"]), role="primary",
-                ),
-            ]
-            rolls.append({
-                "close_security_ids": [str(leg["security_id"]) for leg in closing_legs],
-                "new_legs": new_legs,
-            })
-            window[target] = [asdict(leg) for leg in new_legs]
+                closing_legs = window.pop(closing_strike)
+                quantity = closing_legs[0]["quantity"]
+                new_legs = [
+                    OrderLeg(
+                        label=f"{role} SELL {int(target)} CE ({expiry})", security_id=str(row["ce_security_id"]),
+                        trading_symbol=f"{underlying} {int(target)} CE {expiry}", exchange_segment=meta["option_segment"],
+                        transaction_type="SELL", quantity=quantity, order_type=order_type, product_type="INTRADAY",
+                        price=float(row["ce_ltp"]), role="primary",
+                    ),
+                    OrderLeg(
+                        label=f"{role} SELL {int(target)} PE ({expiry})", security_id=str(row["pe_security_id"]),
+                        trading_symbol=f"{underlying} {int(target)} PE {expiry}", exchange_segment=meta["option_segment"],
+                        transaction_type="SELL", quantity=quantity, order_type=order_type, product_type="INTRADAY",
+                        price=float(row["pe_ltp"]), role="primary",
+                    ),
+                ]
+                rolls.append({
+                    "close_security_ids": [str(leg["security_id"]) for leg in closing_legs],
+                    "new_legs": new_legs,
+                })
+                window[target] = [asdict(leg) for leg in new_legs]
 
-            # Re-derive B/M/T from the updated window for the next loop
-            # check (handles a spot move spanning more than one gap).
-            b, m, t = sorted(window.keys())
+                # Re-derive B/M/T from the updated window for the next loop
+                # check (handles a spot move spanning more than one gap).
+                b, m, t = sorted(window.keys())
+
+        if hedge_due:
+            # Re-picked exactly like the entry-time hedge, just anchored to
+            # the *current* ATM instead of the day's opening one — walking
+            # outward from today's spot naturally lands past the old,
+            # now-too-close strike.
+            atm_strike = _nearest_strike(strikes_avail, spot)
+            atm_index = strikes_avail.index(atm_strike)
+            hedge_target = float(p.get("hedge_premium_target") or 0)
+            for option_type, leg in hedge_due.items():
+                price_col = "ce_ltp" if option_type == "CE" else "pe_ltp"
+                sid_col = "ce_security_id" if option_type == "CE" else "pe_security_id"
+                best_strike, best_row = find_strike_by_nearest_premium(
+                    chain_df, strikes_avail, atm_index, option_type, price_col, sid_col, hedge_target, include_start=False,
+                )
+                if best_row is None:
+                    continue  # no valid fresh-hedge candidate this pass — leave the old hedge in place, retry next poll
+                if best_strike == _strike_of(leg):
+                    continue  # nothing actually changed — don't close/reopen the same strike
+                rolls.append({
+                    "close_security_ids": [str(leg["security_id"])],
+                    "new_legs": [OrderLeg(
+                        label=f"HEDGE BUY {int(best_strike)} {option_type} ({expiry})",
+                        security_id=str(best_row[sid_col]),
+                        trading_symbol=f"{underlying} {int(best_strike)} {option_type} {expiry}",
+                        exchange_segment=meta["option_segment"],
+                        transaction_type="BUY",
+                        quantity=leg["quantity"],
+                        order_type=order_type,
+                        product_type="INTRADAY",
+                        price=float(best_row[price_col]),
+                        role="hedge",
+                    )],
+                })
 
         if not rolls:
             return None

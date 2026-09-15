@@ -111,8 +111,8 @@
                 </select>
                 <div class="form-text">
                     Applies to each CE/PE leg's own entry premium. When one leg hits its stop, only that leg
-                    closes — its sibling (the other side of the same pair) has its stop trailed to cost (0% loss
-                    allowed from then on).
+                    closes — its sibling (the other side of the same pair) is completely untouched and keeps
+                    running on its own unmodified stop/target.
                 </div>
             </div>
             <div class="col-md-6">
@@ -122,13 +122,15 @@
                     <option value="80" {{ 'selected' if params.leg_target_pct | int == 80 else '' }}>80%</option>
                 </select>
                 <div class="form-text">
-                    When one leg hits its own target, only that leg closes — its sibling keeps running untouched
-                    (no cost-trail on a target hit, only on a stop-loss).
+                    When one leg hits its own target, only that leg closes — its sibling keeps running untouched,
+                    same as on a stop-loss.
                 </div>
             </div>
             <div class="col-12 small text-body-secondary">
-                A pair's T/M/B slot is never closed just because one side exits — the surviving leg keeps running
-                until its own stop/target, or until spot moves far enough for that slot to roll away.
+                A pair's T/M/B slot is never closed just because one side exits — and a lone survivor is never
+                swept up by a later roll either, even after its strike moves out of the window. It keeps running
+                until its own stop/target fires, or the whole run ends. Only a strike whose both legs are still
+                open when the window rolls past it closes away as a pair.
             </div>
 
             <div class="col-12"><hr></div>
@@ -146,12 +148,22 @@
                     Buys the CE and PE whose live premium is closest to this (e.g. 5 or 10) — one of each,
                     protecting all three pairs' combined exposure at once. Lot size is <strong>3&times; your
                     Lots per Pair</strong> above (one hedge per side, sized for all three pairs together), bought
-                    once at entry and held unchanged all day — it does not roll with T/M/B, is never touched by
-                    the per-leg stop-loss/target above, and closes together with everything else at the daily
-                    stop-loss/target, end time, or a manual Close Now.
+                    once at entry. It does not roll with T/M/B and is never touched by the per-leg stop-loss/target
+                    above, but each side re-hedges itself independently — see the buffer below — and closes
+                    together with everything else at the daily stop-loss/target, end time, or a manual Close Now.
                 </div>
             </div>
-            <div class="col-md-6"></div>
+            <div class="col-md-6">
+                <label class="form-label">Hedge Re-entry Buffer (points)</label>
+                <input type="number" step="1" min="0" name="hedge_reentry_buffer"
+                       value="{{ params.hedge_reentry_buffer }}" class="form-control">
+                <div class="form-text">
+                    Once spot comes within this many points of a hedge leg's own strike, that leg is closed and a
+                    fresh CE/PE hedge is bought at the same target premium above, from the current spot — landing
+                    further away since it's no longer cheap and far OTM. Applies independently to the CE and PE
+                    hedge. Set to 0 to disable — the hedge then stays fixed all day, as before.
+                </div>
+            </div>
 
             <div class="col-12"><hr></div>
 

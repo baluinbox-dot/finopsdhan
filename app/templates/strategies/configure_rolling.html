@@ -131,11 +131,22 @@
                     Buys the CE and PE whose live premium is closest to this (e.g. 5 or 10) — one of each,
                     protecting all three pairs' combined exposure at once. Lot size is <strong>3&times; your
                     Lots per Pair</strong> above (one hedge per side, sized for all three pairs together), bought
-                    once at entry and held unchanged all day — it does not roll with T/M/B, and closes together
-                    with everything else at the daily stop-loss/target, end time, or a manual Close Now.
+                    once at entry. It does not roll with T/M/B, but each side re-hedges itself independently —
+                    see the buffer below — and closes together with everything else at the daily stop-loss/target,
+                    end time, or a manual Close Now.
                 </div>
             </div>
-            <div class="col-md-6"></div>
+            <div class="col-md-6">
+                <label class="form-label">Hedge Re-entry Buffer (points)</label>
+                <input type="number" step="1" min="0" name="hedge_reentry_buffer"
+                       value="{{ params.hedge_reentry_buffer }}" class="form-control">
+                <div class="form-text">
+                    Once spot comes within this many points of a hedge leg's own strike, that leg is closed and a
+                    fresh CE/PE hedge is bought at the same target premium above, from the current spot — landing
+                    further away since it's no longer cheap and far OTM. Applies independently to the CE and PE
+                    hedge. Set to 0 to disable — the hedge then stays fixed all day, as before.
+                </div>
+            </div>
 
             <div class="col-12"><hr></div>
 

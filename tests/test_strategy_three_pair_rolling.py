@@ -465,6 +465,154 @@ def test_no_roll_when_window_is_not_exactly_three_strikes():
     assert strategy.evaluate_rolls(ctx, notes) is None
 
 
+# --- hedge re-entry ---
+
+_WIDE_STRIKES = list(range(23800, 25001, 50))  # wide enough to hold both the T/M/B window and roaming hedge strikes
+
+
+def _mock_dhan_client_custom_premiums(spot: float, pe_overrides: dict[int, float] | None = None, ce_overrides: dict[int, float] | None = None) -> MagicMock:
+    """Like `_mock_dhan_client`, but lets a test pin specific strikes'
+    premiums (default 60/55 elsewhere) so `find_strike_by_nearest_premium`'s
+    "closest to target" search lands on a strike the test controls, instead
+    of an arbitrary tie-broken neighbor."""
+    pe_overrides = pe_overrides or {}
+    ce_overrides = ce_overrides or {}
+    dhan = MagicMock()
+    dhan.expiry_list.return_value = {"status": "success", "data": {"status": "success", "data": ["2026-08-27"]}}
+    oc = {
+        f"{strike}.000000": {
+            "ce": {"security_id": _ce_id(strike), "last_price": ce_overrides.get(strike, 60.0), "greeks": {}},
+            "pe": {"security_id": _pe_id(strike), "last_price": pe_overrides.get(strike, 55.0), "greeks": {}},
+        }
+        for strike in _WIDE_STRIKES
+    }
+    dhan.option_chain.return_value = {"status": "success", "data": {"status": "success", "data": {"last_price": spot, "oc": oc}}}
+    dhan.ticker_data.return_value = {"status": "success", "data": {"status": "success", "data": {"IDX_I": {"13": {"last_price": spot}}}}}
+    return dhan
+
+
+def test_hedge_reentry_closes_and_reopens_pe_hedge_as_spot_approaches_its_strike():
+    """Spot is comfortably inside a window nowhere near the hedge strikes
+    (so no primary shift fires) but has closed to within the configured
+    buffer of the PE hedge's own strike (24150) -- that leg alone should
+    close and be replaced by a fresh PE hedge, picked by nearest premium to
+    the target from the *current* spot, landing further away (24050)."""
+    strategy = ThreePairRollingStrategy()
+    dhan = _mock_dhan_client_custom_premiums(
+        spot=24190.0,
+        # Old hedge strike (24150) deliberately made a poor match now, so the
+        # search doesn't just re-pick the strike it's already holding.
+        pe_overrides={24150: 20.0, 24100: 12.0, 24050: 5.3},
+    )
+    ctx = StrategyContext(dhan_client=dhan, params={
+        "expiry": "2026-08-27", "strike_gap": 50,
+        "hedge_enabled": True, "hedge_premium_target": 5, "hedge_reentry_buffer": 50,
+    })
+
+    notes = _window_notes(b=24000, m=24050, t=25000)  # spot 24190 sits well inside -- no primary shift
+    notes["legs"] += _hedge_legs(ce_strike=24650, pe_strike=24150)
+
+    decision = strategy.evaluate_rolls(ctx, notes)
+
+    assert decision is not None
+    assert len(decision["rolls"]) == 1
+    roll = decision["rolls"][0]
+    assert roll["close_security_ids"] == [_pe_id(24150)]
+    assert len(roll["new_legs"]) == 1
+    new_leg = roll["new_legs"][0]
+    assert new_leg.role == "hedge"
+    assert new_leg.transaction_type == "BUY"
+    assert new_leg.quantity == 225  # unchanged from the closed hedge leg
+    assert new_leg.trading_symbol == "NIFTY 24050 PE 2026-08-27"
+
+
+def test_hedge_reentry_disabled_when_buffer_is_zero():
+    strategy = ThreePairRollingStrategy()
+    dhan = _mock_dhan_client_custom_premiums(spot=24190.0, pe_overrides={24050: 5.3})
+    ctx = StrategyContext(dhan_client=dhan, params={
+        "expiry": "2026-08-27", "strike_gap": 50,
+        "hedge_enabled": True, "hedge_premium_target": 5, "hedge_reentry_buffer": 0,
+    })
+
+    notes = _window_notes(b=24000, m=24050, t=25000)
+    notes["legs"] += _hedge_legs(ce_strike=24650, pe_strike=24150)
+
+    assert strategy.evaluate_rolls(ctx, notes) is None
+
+
+def test_hedge_reentry_skips_when_the_best_match_is_the_same_strike_already_held():
+    """Guards against closing and reopening the identical strike every poll
+    once spot sits inside the buffer zone -- if the nearest-premium search
+    lands back on the strike already held, nothing should happen."""
+    strategy = ThreePairRollingStrategy()
+    # No overrides -- every strike prices at the default 55.0, so the walk
+    # from the new ATM immediately settles on the first candidate examined,
+    # which is the hedge's own current strike (24150).
+    dhan = _mock_dhan_client_custom_premiums(spot=24190.0)
+    ctx = StrategyContext(dhan_client=dhan, params={
+        "expiry": "2026-08-27", "strike_gap": 50,
+        "hedge_enabled": True, "hedge_premium_target": 5, "hedge_reentry_buffer": 50,
+    })
+
+    notes = _window_notes(b=24000, m=24050, t=25000)
+    notes["legs"] += _hedge_legs(ce_strike=24650, pe_strike=24150)
+
+    assert strategy.evaluate_rolls(ctx, notes) is None
+
+
+def test_hedge_reentry_is_symmetric_on_the_ce_side():
+    strategy = ThreePairRollingStrategy()
+    dhan = _mock_dhan_client_custom_premiums(
+        spot=24610.0,
+        ce_overrides={24650: 20.0, 24700: 12.0, 24750: 5.4},
+    )
+    ctx = StrategyContext(dhan_client=dhan, params={
+        "expiry": "2026-08-27", "strike_gap": 50,
+        "hedge_enabled": True, "hedge_premium_target": 5, "hedge_reentry_buffer": 50,
+    })
+
+    notes = _window_notes(b=24000, m=24050, t=25000)  # spot 24610 still well inside -- no primary shift
+    notes["legs"] += _hedge_legs(ce_strike=24650, pe_strike=24150)
+
+    decision = strategy.evaluate_rolls(ctx, notes)
+
+    assert decision is not None
+    assert len(decision["rolls"]) == 1
+    roll = decision["rolls"][0]
+    assert roll["close_security_ids"] == [_ce_id(24650)]
+    new_leg = roll["new_legs"][0]
+    assert new_leg.trading_symbol == "NIFTY 24750 CE 2026-08-27"
+
+
+def test_hedge_reentry_and_a_primary_shift_can_both_fire_in_the_same_pass():
+    strategy = ThreePairRollingStrategy()
+    # Window B=24350 M=24400 T=24450; spot reaches B -> primary shift down.
+    # The PE hedge (24300, deliberately distinct from every window strike so
+    # this doesn't also exercise the hedge/window strike-collision case) is
+    # within the buffer of that same spot.
+    dhan = _mock_dhan_client_custom_premiums(
+        spot=24350.0,
+        pe_overrides={24300: 20.0, 24250: 12.0, 24200: 5.05},
+    )
+    ctx = StrategyContext(dhan_client=dhan, params={
+        "expiry": "2026-08-27", "strike_gap": 50,
+        "hedge_enabled": True, "hedge_premium_target": 5, "hedge_reentry_buffer": 50,
+    })
+
+    notes = _window_notes()  # b=24350, m=24400, t=24450
+    notes["legs"] += _hedge_legs(ce_strike=24800, pe_strike=24300)
+
+    decision = strategy.evaluate_rolls(ctx, notes)
+
+    assert decision is not None
+    assert len(decision["rolls"]) == 2
+    primary_roll = next(r for r in decision["rolls"] if r["new_legs"][0].role == "primary")
+    hedge_roll = next(r for r in decision["rolls"] if r["new_legs"][0].role == "hedge")
+    assert set(primary_roll["close_security_ids"]) == {_ce_id(24450), _pe_id(24450)}
+    assert hedge_roll["close_security_ids"] == [_pe_id(24300)]
+    assert hedge_roll["new_legs"][0].trading_symbol == "NIFTY 24200 PE 2026-08-27"
+
+
 # --- daily stop-loss / target / end time ---
 
 
