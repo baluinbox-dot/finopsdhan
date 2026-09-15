@@ -158,6 +158,60 @@ def _send_close_alert(user: User, strategy_name: str, run: StrategyRun, is_live:
         logger.exception("Failed to send close email alert for run_id=%s", run.id)
 
 
+def _roll_leg_line(leg: OrderLeg, *, html: bool) -> str:
+    """One leg's line for a roll alert -- always an `OrderLeg` (the actual
+    reversing order for a closing leg, or the new entry order for an
+    opened one), never the stale pre-roll entry-side data."""
+    d = asdict(leg)
+    if html:
+        return f"<li>{d['transaction_type']} {d['quantity']} × {d['trading_symbol']} @ ₹{d['price']:.2f}</li>"
+    return f"- {d['transaction_type']} {d['quantity']} x {d['trading_symbol']} @ Rs {d['price']:.2f}"
+
+
+def _send_roll_alert(
+    user: User,
+    strategy_name: str,
+    run: StrategyRun,
+    is_live: bool,
+    closed_legs: list[OrderLeg],
+    new_legs: list[OrderLeg],
+    pnl_delta: float,
+) -> None:
+    """Email the owner that a roll (a group of legs closed and immediately
+    replaced within an already-open run -- e.g. the T/M/B window shifting,
+    or a hedge leg re-entering -- see `Strategy.evaluate_rolls`) just fired.
+    One email per roll dict the engine actually applies, no cooldown (a
+    real, infrequent trading event, not a poll-tick condition). Distinct
+    from `_send_entry_alert`/`_send_close_alert`, which only cover a whole
+    run opening/closing. Never lets a mail-server hiccup propagate."""
+    mode = "LIVE" if is_live else "PAPER"
+    closed_html = "".join(_roll_leg_line(leg, html=True) for leg in closed_legs) or "<li>none — already closed earlier</li>"
+    closed_text = "\n".join(_roll_leg_line(leg, html=False) for leg in closed_legs) or "- none — already closed earlier"
+    new_html = "".join(_roll_leg_line(leg, html=True) for leg in new_legs)
+    new_text = "\n".join(_roll_leg_line(leg, html=False) for leg in new_legs)
+    pnl_line = f"₹{pnl_delta:,.0f}" if closed_legs else "n/a"
+
+    try:
+        send_email(
+            user.email,
+            f"[FinOps Algo] Rolled: {strategy_name} ({mode})",
+            html_body=(
+                f"<p><b>{strategy_name}</b> rolled a position in <b>{mode}</b> mode.</p>"
+                f"<p>Closed:</p><ul>{closed_html}</ul>"
+                f"<p>Opened:</p><ul>{new_html}</ul>"
+                f"<p>Realized P&amp;L on the closed leg(s): {pnl_line}</p>"
+            ),
+            text_body=(
+                f"{strategy_name} rolled a position in {mode} mode.\n\n"
+                f"Closed:\n{closed_text}\n\n"
+                f"Opened:\n{new_text}\n\n"
+                f"Realized P&L on the closed leg(s): {pnl_line}"
+            ),
+        )
+    except Exception:  # noqa: BLE001 — an alerting failure must never break strategy evaluation
+        logger.exception("Failed to send roll email alert for run_id=%s", run.id)
+
+
 def find_open_run(user_strategy: UserStrategy) -> StrategyRun | None:
     for run in sorted(user_strategy.runs, key=lambda r: r.started_at, reverse=True):
         if run.status == "open":
@@ -403,6 +457,8 @@ def _apply_rolls(
     decision: dict[str, Any],
     *,
     is_live: bool,
+    user: User,
+    strategy_name: str,
 ) -> None:
     """Close each named group of legs at a fresh quote and immediately
     open its replacement group, without touching any other leg or ending
@@ -410,7 +466,8 @@ def _apply_rolls(
     legs are appended to `legs_planned["legs"]` (never replacing history)
     so a strategy can always see every strike a given `pair_id` has held
     today — e.g. app.strategies.three_pair_rolling's unique-spot-per-day
-    rule depends on this full history, not just what's currently open."""
+    rule depends on this full history, not just what's currently open.
+    Sends one `_send_roll_alert` email per roll dict actually applied."""
     notes = dict(open_run.legs_planned or {})  # copy so reassignment below is detected as a change
     legs_data = list(notes.get("legs", []))
     leg_state: dict[str, Any] = {sid: dict(state) for sid, state in (notes.get("leg_state") or {}).items()}
@@ -442,6 +499,9 @@ def _apply_rolls(
         # unreachable for them and their behavior is unchanged.
         if not new_legs or (not to_close and not roll.get("allow_empty_close")):
             continue  # nothing valid to do for this roll — skip it, don't half-execute
+
+        roll_pnl = 0.0  # this roll's own realized P&L, for its alert email — pnl_delta below tracks the running total across every roll in this decision
+        closed_exit_legs: list[OrderLeg] = []  # the actual reversing orders placed, for the alert email — not to_close's stale entry-side data
 
         if to_close:
             securities_by_segment: dict[str, list[int]] = {}
@@ -486,7 +546,10 @@ def _apply_rolls(
                     role=leg_data.get("role", "primary"),
                 )
                 _place_or_paper_leg(db, dhan_client, user_id, open_run.id, exit_leg, is_live=is_live)
-                pnl_delta += leg_pnl(leg_data, exit_price)
+                closed_exit_legs.append(exit_leg)
+                leg_exit_pnl = leg_pnl(leg_data, exit_price)
+                pnl_delta += leg_exit_pnl
+                roll_pnl += leg_exit_pnl
                 sid = str(leg_data["security_id"])
                 leg_state[sid] = {**_open_leg_state(sid, leg_state), "status": "closed"}
 
@@ -505,6 +568,7 @@ def _apply_rolls(
             leg_state[sid] = {**_open_leg_state(sid, leg_state), **patch}
 
         any_rolled = True
+        _send_roll_alert(user, strategy_name, open_run, is_live, closed_exit_legs, new_legs, roll_pnl)
 
     if not any_rolled:
         return
@@ -662,7 +726,10 @@ def run_user_strategy(db: Session, user_strategy: UserStrategy) -> None:
 
             roll_decision = impl.evaluate_rolls(exit_ctx, open_run.legs_planned or {})
             if roll_decision:
-                _apply_rolls(db, user_dhan.client, user.id, open_run, roll_decision, is_live=is_live)
+                _apply_rolls(
+                    db, user_dhan.client, user.id, open_run, roll_decision,
+                    is_live=is_live, user=user, strategy_name=strategy.name,
+                )
             return
 
         entry_params = {**strategy.default_params, **user_strategy.params}

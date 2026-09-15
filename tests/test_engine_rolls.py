@@ -8,6 +8,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from unittest.mock import MagicMock
 
+from app.engine import runner
 from app.engine.runner import _apply_rolls, _close_open_run
 from app.models import Order, Strategy, StrategyMode, StrategyRun, User, UserRole, UserStrategy
 from app.strategies.base import OrderLeg
@@ -76,7 +77,10 @@ def test_apply_rolls_closes_old_pair_and_opens_new_one(db_session):
     new_legs[1].price = 15.0
     decision = {"rolls": [{"close_security_ids": [_ce_id(24450), _pe_id(24450)], "new_legs": new_legs}]}
 
-    _apply_rolls(db_session, dhan, run.user_strategy.user_id, run, decision, is_live=False)
+    _apply_rolls(
+        db_session, dhan, run.user_strategy.user_id, run, decision, is_live=False,
+        user=run.user_strategy.user, strategy_name="3-Pair Rolling",
+    )
 
     db_session.refresh(run)
     assert run.status == "open"  # rolling never ends the run
@@ -132,7 +136,10 @@ def test_apply_rolls_skips_roll_when_a_fresh_exit_quote_is_unavailable(db_sessio
     new_legs = _roll_leg("FIN1", 24300, 90.0)
     decision = {"rolls": [{"close_security_ids": [_ce_id(24450), _pe_id(24450)], "new_legs": new_legs}]}
 
-    _apply_rolls(db_session, dhan, run.user_strategy.user_id, run, decision, is_live=False)
+    _apply_rolls(
+        db_session, dhan, run.user_strategy.user_id, run, decision, is_live=False,
+        user=run.user_strategy.user, strategy_name="3-Pair Rolling",
+    )
 
     db_session.refresh(run)
     assert run.legs_planned.get("leg_state") is None  # nothing touched at all
@@ -158,7 +165,10 @@ def test_apply_rolls_ignores_a_roll_with_nothing_currently_open_to_close(db_sess
     new_legs = _roll_leg("FIN1", 24300, 90.0)
     decision = {"rolls": [{"close_security_ids": [_ce_id(24450), _pe_id(24450)], "new_legs": new_legs}]}
 
-    _apply_rolls(db_session, dhan, run.user_strategy.user_id, run, decision, is_live=False)
+    _apply_rolls(
+        db_session, dhan, run.user_strategy.user_id, run, decision, is_live=False,
+        user=run.user_strategy.user, strategy_name="3-Pair Rolling",
+    )
 
     db_session.refresh(run)
     dhan.quote_data.assert_not_called()  # never even tried — nothing valid to act on
@@ -186,7 +196,10 @@ def test_apply_rolls_allow_empty_close_opens_new_legs_with_nothing_to_reverse(db
         "leg_state_patch": {_ce_id(24450): {"in_window": False}, _pe_id(24450): {"in_window": False}},
     }]}
 
-    _apply_rolls(db_session, dhan, run.user_strategy.user_id, run, decision, is_live=False)
+    _apply_rolls(
+        db_session, dhan, run.user_strategy.user_id, run, decision, is_live=False,
+        user=run.user_strategy.user, strategy_name="3-Pair Rolling",
+    )
 
     db_session.refresh(run)
     dhan.quote_data.assert_not_called()  # nothing to reverse -> no exit-quote fetch needed
@@ -225,7 +238,10 @@ def test_apply_rolls_leg_state_patch_applies_even_for_legs_not_closed_this_call(
         "leg_state_patch": {_ce_id(24400): {"sl_at_cost": True}},  # FIN2's CE, untouched by this roll
     }]}
 
-    _apply_rolls(db_session, dhan, run.user_strategy.user_id, run, decision, is_live=False)
+    _apply_rolls(
+        db_session, dhan, run.user_strategy.user_id, run, decision, is_live=False,
+        user=run.user_strategy.user, strategy_name="3-Pair Rolling",
+    )
 
     db_session.refresh(run)
     leg_state = run.legs_planned["leg_state"]
@@ -246,6 +262,7 @@ def test_apply_rolls_final_close_via_close_open_run_skips_rolled_away_legs(db_se
     _apply_rolls(
         db_session, dhan, run.user_strategy.user_id, run,
         {"rolls": [{"close_security_ids": [_ce_id(24450), _pe_id(24450)], "new_legs": new_legs}]}, is_live=False,
+        user=run.user_strategy.user, strategy_name="3-Pair Rolling",
     )
     db_session.refresh(run)
 
@@ -295,7 +312,7 @@ def test_a_revisited_security_id_is_only_reversed_once_on_final_close(db_session
     _apply_rolls(
         db_session, dhan, run.user_strategy.user_id, run,
         {"rolls": [{"close_security_ids": [_ce_id(24450), _pe_id(24450)], "new_legs": _roll_leg("FIN1", 24300, 90.0)}]},
-        is_live=False,
+        is_live=False, user=run.user_strategy.user, strategy_name="3-Pair Rolling",
     )
     db_session.refresh(run)
 
@@ -308,7 +325,7 @@ def test_a_revisited_security_id_is_only_reversed_once_on_final_close(db_session
     _apply_rolls(
         db_session, dhan, run.user_strategy.user_id, run,
         {"rolls": [{"close_security_ids": [_ce_id(24300), _pe_id(24300)], "new_legs": _roll_leg("FIN1", 24450, 65.0)}]},
-        is_live=False,
+        is_live=False, user=run.user_strategy.user, strategy_name="3-Pair Rolling",
     )
     db_session.refresh(run)
 
@@ -344,3 +361,102 @@ def test_a_revisited_security_id_is_only_reversed_once_on_final_close(db_session
     ]
     assert len(final_close_24450_exits) == 2  # one CE, one PE -- not four
     assert len(orders) == 14
+
+
+# --- roll alert emails (Balu's request: an email for every roll, not just entry/close) ---
+
+
+def _capture_emails(monkeypatch) -> list:
+    sent: list = []
+    monkeypatch.setattr(
+        runner, "send_email",
+        lambda to_email, subject, *, html_body, text_body: sent.append((to_email, subject, html_body, text_body)),
+    )
+    return sent
+
+
+def test_apply_rolls_sends_one_alert_email_naming_the_closed_and_new_legs(db_session, monkeypatch):
+    run = _make_open_run(db_session)
+    sent = _capture_emails(monkeypatch)
+    dhan = MagicMock()
+    dhan.quote_data.return_value = {
+        "status": "success",
+        "data": {"status": "success", "data": {"NSE_FNO": {_ce_id(24450): {"last_price": 40.0}, _pe_id(24450): {"last_price": 70.0}}}},
+    }
+    new_legs = _roll_leg("FIN1", 24300, 90.0)
+    new_legs[1].price = 15.0
+    decision = {"rolls": [{"close_security_ids": [_ce_id(24450), _pe_id(24450)], "new_legs": new_legs}]}
+
+    _apply_rolls(
+        db_session, dhan, run.user_strategy.user_id, run, decision, is_live=False,
+        user=run.user_strategy.user, strategy_name="3-Pair Rolling",
+    )
+
+    assert len(sent) == 1
+    to_email, subject, html_body, text_body = sent[0]
+    assert to_email == "trader@example.com"
+    assert "Rolled" in subject and "3-Pair Rolling" in subject and "PAPER" in subject
+    # Closed leg (old strike, reversed at the fresh exit quote) and new leg
+    # (new strike, at its own entry price) both named in the body.
+    assert "NIFTY 24450 CE" in text_body and "BUY 75" in text_body  # closing a SELL reverses to BUY
+    assert "NIFTY 24300 CE" in text_body and "SELL 75" in text_body
+    # P&L: SELL 60 -> bought back at 40 (profit) + SELL 60 -> bought back at 70 (loss).
+    expected_pnl = (60.0 - 40.0) * 75 + (60.0 - 70.0) * 75
+    assert f"{expected_pnl:,.0f}" in text_body
+
+
+def test_apply_rolls_sends_a_separate_alert_email_per_roll_in_one_decision(db_session, monkeypatch):
+    """A single evaluate_rolls pass can return more than one roll (e.g. a
+    big spot gap producing two sequential T/M/B shifts, or a T/M/B shift
+    and a hedge re-entry in the same poll) -- each must get its own email,
+    not one combined one."""
+    run = _make_open_run(db_session)
+    sent = _capture_emails(monkeypatch)
+    dhan = MagicMock()
+    dhan.quote_data.return_value = {
+        "status": "success",
+        "data": {"status": "success", "data": {"NSE_FNO": {
+            _ce_id(24450): {"last_price": 40.0}, _pe_id(24450): {"last_price": 70.0},
+            _ce_id(24400): {"last_price": 45.0}, _pe_id(24400): {"last_price": 65.0},
+        }}},
+    }
+    decision = {
+        "rolls": [
+            {"close_security_ids": [_ce_id(24450), _pe_id(24450)], "new_legs": _roll_leg("FIN1", 24300, 90.0)},
+            {"close_security_ids": [_ce_id(24400), _pe_id(24400)], "new_legs": _roll_leg("FIN2", 24250, 95.0)},
+        ]
+    }
+
+    _apply_rolls(
+        db_session, dhan, run.user_strategy.user_id, run, decision, is_live=False,
+        user=run.user_strategy.user, strategy_name="3-Pair Rolling",
+    )
+
+    assert len(sent) == 2
+    bodies = [s[3] for s in sent]
+    assert any("NIFTY 24450 CE" in b and "NIFTY 24300 CE" in b for b in bodies)
+    assert any("NIFTY 24400 CE" in b and "NIFTY 24250 CE" in b for b in bodies)
+
+
+def test_apply_rolls_alert_says_none_closed_when_the_roll_had_nothing_to_reverse(db_session, monkeypatch):
+    """allow_empty_close (used by the per-leg SL/target sibling strategy
+    when both of a strike's legs already exited independently before the
+    roll boundary) still opens a fresh pair and must still alert -- the
+    email should say so instead of listing a phantom closed leg."""
+    run = _make_open_run(db_session)
+    sent = _capture_emails(monkeypatch)
+    dhan = MagicMock()
+    decision = {"rolls": [{
+        "close_security_ids": [], "new_legs": _roll_leg("FIN1", 24300, 90.0), "allow_empty_close": True,
+    }]}
+
+    _apply_rolls(
+        db_session, dhan, run.user_strategy.user_id, run, decision, is_live=False,
+        user=run.user_strategy.user, strategy_name="3-Pair Rolling",
+    )
+
+    assert len(sent) == 1
+    text_body = sent[0][3]
+    assert "already closed earlier" in text_body
+    assert "NIFTY 24300 CE" in text_body
+    assert "n/a" in text_body  # no realized P&L to report -- nothing was actually closed this roll
