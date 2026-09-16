@@ -423,6 +423,49 @@ def test_status_page_shows_monthly_and_yearly_totals(client, db_session):
     assert "-40" in text
 
 
+def test_status_page_filters_by_weekday(client, db_session):
+    """A stand-in for "expiry day only" -- the app can't recover the real
+    historical expiry weekday, so the user picks one to filter to."""
+    strategy = _publish_strategy(client, db_session)
+    user = _register_and_login(client, db_session, "trader@example.com")
+
+    # 2024-01-01 is a Monday: 01-04/01-11 are Thursdays, 01-05 is a Friday.
+    trades = [
+        _trade_on("2024-01-04", 100.0),   # Thursday
+        _trade_on("2024-01-05", -20.0),   # Friday
+        _trade_on("2024-01-11", 50.0),    # Thursday
+    ]
+    run = BacktestRun(
+        user_id=user.id, strategy_id=strategy.id, underlying="NIFTY",
+        start_date=date(2024, 1, 1), end_date=date(2024, 1, 31), params={}, status="completed",
+        result={"trade_count": 3, "total_pnl": 130.0, "win_rate": 66.7, "max_drawdown": 20.0,
+                "stale_trade_count": 0, "equity_curve": [], "trades": trades},
+    )
+    db_session.add(run)
+    db_session.commit()
+    db_session.refresh(run)
+
+    # No filter -> all 3 trades, full total_pnl shown.
+    resp = client.get(f"/backtest/{strategy.id}/runs/{run.id}")
+    assert "Trades (3)" in resp.text
+    assert "₹130" in resp.text
+
+    # Thursday (weekday=3) -> only the two Thursday trades, net 150.
+    resp = client.get(f"/backtest/{strategy.id}/runs/{run.id}?weekday=3")
+    assert resp.status_code == 200
+    assert "Trades (2)" in resp.text
+    assert "(filtered)" in resp.text
+    assert "₹150" in resp.text  # filtered Total P&L
+    assert resp.text.count("2024-01-04") >= 1
+    assert resp.text.count("2024-01-11") >= 1
+    assert "2024-01-05" not in resp.text  # the Friday trade is excluded
+
+    # Friday (weekday=4) -> only the one Friday trade, net -20.
+    resp = client.get(f"/backtest/{strategy.id}/runs/{run.id}?weekday=4")
+    assert "Trades (1)" in resp.text
+    assert "₹-20" in resp.text
+
+
 # --- deleting a saved run ---
 
 

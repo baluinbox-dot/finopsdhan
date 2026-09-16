@@ -25,37 +25,58 @@
 </div>
 {% elif run.status == 'completed' %}
 {% set r = run.result or {} %}
+
+<form method="get" action="{{ url('/backtest/' ~ strategy.id ~ '/runs/' ~ run.id) }}" class="d-flex align-items-center gap-2 mb-3">
+    <label for="weekdayFilter" class="small text-body-secondary mb-0">Day of week</label>
+    <select id="weekdayFilter" name="weekday" class="form-select form-select-sm w-auto" onchange="this.form.submit()">
+        <option value="all" {{ 'selected' if selected_weekday == 'all' else '' }}>All days</option>
+        {% for value, label in weekday_choices %}
+        <option value="{{ value }}" {{ 'selected' if selected_weekday == value | string else '' }}>{{ label }}</option>
+        {% endfor %}
+    </select>
+    <input type="hidden" name="per_page" value="{{ per_page }}">
+    {% if selected_weekday != 'all' %}
+    <span class="small text-body-secondary">
+        A stand-in for "expiry day" — pick whichever weekday actually matched expiry for this underlying/period;
+        the app has no way to look up the real historical expiry day-of-week.
+    </span>
+    {% endif %}
+</form>
+
 <div class="row g-3 mb-3">
     <div class="col-6 col-md-3">
         <div class="card stat-card h-100"><div class="card-body">
-            <div class="small text-body-secondary">Trades</div>
-            <div class="fs-4">{{ r.get('trade_count', 0) }}</div>
+            <div class="small text-body-secondary">Trades{{ ' (filtered)' if selected_weekday != 'all' else '' }}</div>
+            <div class="fs-4">{{ total_trades if selected_weekday != 'all' else r.get('trade_count', 0) }}</div>
         </div></div>
     </div>
     <div class="col-6 col-md-3">
         <div class="card stat-card h-100"><div class="card-body">
-            <div class="small text-body-secondary">Total P&L</div>
-            <div class="fs-4 {{ 'text-success' if r.get('total_pnl', 0) >= 0 else 'text-danger' }}">₹{{ '{:,.0f}'.format(r.get('total_pnl', 0)) }}</div>
+            <div class="small text-body-secondary">Total P&L{{ ' (filtered)' if selected_weekday != 'all' else '' }}</div>
+            {% set pnl = filtered_pnl if selected_weekday != 'all' else r.get('total_pnl', 0) %}
+            <div class="fs-4 {{ 'text-success' if pnl >= 0 else 'text-danger' }}">₹{{ '{:,.0f}'.format(pnl) }}</div>
         </div></div>
     </div>
     <div class="col-6 col-md-3">
         <div class="card stat-card h-100"><div class="card-body">
-            <div class="small text-body-secondary">Win Rate</div>
-            <div class="fs-4">{{ '%.1f'|format(r.get('win_rate')) if r.get('win_rate') is not none else '—' }}%</div>
+            <div class="small text-body-secondary">Win Rate{{ ' (filtered)' if selected_weekday != 'all' else '' }}</div>
+            {% set win_rate = filtered_win_rate if selected_weekday != 'all' else r.get('win_rate') %}
+            <div class="fs-4">{{ '%.1f'|format(win_rate) if win_rate is not none else '—' }}%</div>
         </div></div>
     </div>
     <div class="col-6 col-md-3">
         <div class="card stat-card h-100"><div class="card-body">
-            <div class="small text-body-secondary">Max Drawdown</div>
+            <div class="small text-body-secondary">Max Drawdown (full period)</div>
             <div class="fs-4">₹{{ '{:,.0f}'.format(r.get('max_drawdown', 0)) }}</div>
         </div></div>
     </div>
 </div>
 
-{% if r.get('stale_trade_count') %}
+{% set stale_count = filtered_stale_count if selected_weekday != 'all' else r.get('stale_trade_count', 0) %}
+{% if stale_count %}
 <div class="alert alert-warning small">
-    {{ r.stale_trade_count }} trade(s) were force-closed at a last-known (stale) price rather than a fresh quote —
-    treat their P&L as an approximation, not a final number.
+    {{ stale_count }} trade(s){{ ' (filtered)' if selected_weekday != 'all' else '' }} were force-closed at a
+    last-known (stale) price rather than a fresh quote — treat their P&L as an approximation, not a final number.
 </div>
 {% endif %}
 

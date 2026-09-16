@@ -476,10 +476,26 @@ def _period_breakdown(trades: list[dict], period_len: int) -> list[dict]:
     return rows
 
 
+# Monday=0 .. Sunday=6 (date.weekday() convention), for the results page's
+# "filter to one weekday" control -- a proxy for "expiry day" since Dhan's
+# API has no way to recover the real historical expiry-day-of-week (NSE/
+# BSE have changed it more than once; see app.backtest.expiry_calendar's
+# identical caveat). The user picks whichever weekday actually matched
+# expiry for the underlying/period they're looking at, rather than this
+# app guessing one.
+_WEEKDAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+
+
+def _filter_trades_by_weekday(trades: list[dict], weekday: int | None) -> list[dict]:
+    if weekday is None:
+        return trades
+    return [t for t in trades if datetime.fromisoformat(t["opened_at"]).weekday() == weekday]
+
+
 @router.get("/{strategy_id}/runs/{run_id}")
 def backtest_status(
     request: Request, db: DbSession, current_user: CurrentUser, strategy_id: uuid.UUID, run_id: uuid.UUID,
-    page: int = 1, per_page: int = ORDERS_PER_PAGE_DEFAULT,
+    page: int = 1, per_page: int = ORDERS_PER_PAGE_DEFAULT, weekday: str = "all",
 ):
     strategy, redirect = _load_strategy_or_redirect(db, request, strategy_id)
     if redirect:
@@ -493,13 +509,22 @@ def backtest_status(
 
     equity_curve_json = json.dumps((run.result or {}).get("equity_curve", []))
 
+    weekday_filter = int(weekday) if weekday in ("0", "1", "2", "3", "4", "5", "6") else None
+    all_trades_unfiltered = (run.result or {}).get("trades", [])
+    filtered_trades = _filter_trades_by_weekday(all_trades_unfiltered, weekday_filter)
+
     # Most-recent-first, same convention as the Dashboard's Closed Orders --
     # a long-running strategy's trade list can run into the hundreds, and
     # the newest ones are what you'd check first.
-    all_trades = list(reversed((run.result or {}).get("trades", [])))
+    all_trades = list(reversed(filtered_trades))
     paged_trades, page, per_page, total_pages = _paginate(all_trades, page, per_page)
     monthly_breakdown = _period_breakdown(all_trades, 7)
     yearly_breakdown = _period_breakdown(all_trades, 4)
+
+    filtered_pnl = sum(t["realized_pnl"] for t in filtered_trades)
+    filtered_wins = sum(1 for t in filtered_trades if t["realized_pnl"] > 0)
+    filtered_win_rate = (filtered_wins / len(filtered_trades) * 100) if filtered_trades else None
+    filtered_stale_count = sum(1 for t in filtered_trades if t["used_stale_price"])
 
     return render(
         request,
@@ -511,6 +536,9 @@ def backtest_status(
             "page": page, "per_page": per_page, "total_pages": total_pages,
             "per_page_choices": ORDERS_PER_PAGE_CHOICES,
             "monthly_breakdown": monthly_breakdown, "yearly_breakdown": yearly_breakdown,
+            "weekday_choices": list(enumerate(_WEEKDAY_NAMES)), "selected_weekday": weekday,
+            "filtered_pnl": filtered_pnl, "filtered_win_rate": filtered_win_rate,
+            "filtered_stale_count": filtered_stale_count,
         },
     )
 
