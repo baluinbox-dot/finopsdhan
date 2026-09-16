@@ -49,12 +49,14 @@ import uuid
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
-import pandas as pd
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # repo root, so `import app...` resolves
 
-from app.db import SessionLocal
-from app.dhan.client import get_user_dhan_client
-from app.dhan.helpers import UNDERLYINGS
-from app.models import DataDownloadRun, User
+import pandas as pd  # noqa: E402
+
+from app.db import SessionLocal  # noqa: E402
+from app.dhan.client import get_user_dhan_client  # noqa: E402
+from app.dhan.helpers import UNDERLYINGS  # noqa: E402
+from app.models import DataDownloadRun, User  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("backtest_download")
