@@ -314,3 +314,40 @@ class TradeNote(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now, nullable=False)
 
     user: Mapped["User"] = relationship()
+
+
+class DataDownloadRun(Base):
+    """One trigger of scripts/backtest/download_historical_data.py from the
+    admin UI (see app.routers.admin) -- a long-running (hours), single
+    shared operation across the whole app: it refreshes the same on-disk
+    historical CSV cache every backtest reads from, for all three
+    underlyings at once. Deliberately global, not per-user -- only ever one
+    may run at a time (same one-at-a-time philosophy as BacktestRun's lock,
+    enforced against this table in app.routers.admin), since it's one
+    shared Dhan account and one shared on-disk cache regardless of who
+    clicked the button.
+
+    The script itself only knows how to log to stdout; this row is
+    populated the same way BacktestRun's subprocess populates its own row
+    -- download_historical_data.py's main() accepts this row's id as an
+    optional argument and writes status/error_message/finished_at into it
+    directly, skipped entirely when the script is still run bare via SSH
+    with no argument, exactly as it always has been."""
+
+    __tablename__ = "data_download_runs"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    started_by_user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+
+    # running -> completed | failed. A "running" row whose pid is no longer
+    # alive (the OS OOM-killed it, or the VM rebooted) is reaped the same
+    # way BacktestRun's stale rows are -- see app.routers.admin's
+    # _active_download.
+    status: Mapped[str] = mapped_column(String(20), default="running", nullable=False)
+    pid: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, nullable=False)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    error_message: Mapped[str] = mapped_column(Text, default="", nullable=False)
+
+    started_by: Mapped["User"] = relationship()

@@ -7,14 +7,19 @@ Pulls, for each configured underlying (NIFTY / BANKNIFTY / SENSEX):
     -- confirmed empirically to mean "the nearest weekly contract as of
     each moment in the range," not a single contract pinned to today).
 
-Not part of the live app's request path -- a standalone script, run
-manually (or via cron later). Reuses the app's own DB/Dhan-client
-plumbing (the same encrypted credential every live/paper strategy uses),
-but does NOT coordinate with the live app's in-process Dhan throttle
-registries in app.dhan.helpers -- this is a separate process with its own
-(more conservative) pacing instead. Do not run this at the same time as
-anything latency-sensitive on the live account without checking
-_SLEEP_SECONDS is still comfortably safe.
+Not part of the live app's request path -- runs as a standalone detached
+subprocess, whether started manually via SSH (`python
+download_historical_data.py`, no arguments) or from the admin-only
+"Data Download" page in the app (app.routers.admin), which passes a
+DataDownloadRun row's id as the one optional argument so this script can
+report its own status/error back into it -- see main(). Reuses the app's
+own DB/Dhan-client plumbing (the same encrypted credential every
+live/paper strategy uses), but does NOT coordinate with the live app's
+in-process Dhan throttle registries in app.dhan.helpers -- this is a
+separate process with its own (more conservative) pacing instead. Do not
+run this at the same time as anything latency-sensitive on the live
+account without checking _SLEEP_SECONDS is still comfortably safe (the
+admin page's own copy warns about this too).
 
 Resumable by design: every (underlying, series, date-chunk) is written to
 its own CSV file under DATA_ROOT, named by its exact chunk boundaries. A
@@ -38,8 +43,10 @@ not something worth the VM risk now.
 from __future__ import annotations
 
 import logging
+import sys
 import time
-from datetime import date, timedelta
+import uuid
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -47,7 +54,7 @@ import pandas as pd
 from app.db import SessionLocal
 from app.dhan.client import get_user_dhan_client
 from app.dhan.helpers import UNDERLYINGS
-from app.models import User
+from app.models import DataDownloadRun, User
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("backtest_download")
@@ -195,19 +202,46 @@ def download_spot(client, underlying: str, meta: dict, start: date, end: date) -
         time.sleep(_SLEEP_SECONDS)
 
 
-def main() -> None:
-    client = _get_client()
-    today = date.today()
+def main(run_id: str | None = None) -> None:
+    """`run_id` (a DataDownloadRun's id) is optional -- present when the
+    admin UI started this subprocess (app.routers.admin), absent for a
+    plain manual `python download_historical_data.py` run via SSH, which
+    behaves exactly as it always has (logs to stdout only, no DB row to
+    update). Either way, an exception is logged and re-raised (never
+    swallowed) so a manual run's own traceback/exit code is unchanged;
+    when a row is present its status/error_message/finished_at are
+    written before the re-raise, so the admin page reflects the failure
+    instead of that row sitting at "running" forever."""
+    db = SessionLocal() if run_id else None
+    run = db.get(DataDownloadRun, uuid.UUID(run_id)) if db else None
+    try:
+        client = _get_client()
+        today = date.today()
 
-    for underlying in ("NIFTY", "BANKNIFTY", "SENSEX"):
-        meta = UNDERLYINGS[underlying]
-        logger.info("=== %s: spot ===", underlying)
-        download_spot(client, underlying, meta, _BACKFILL_START, today)
-        logger.info("=== %s: options ===", underlying)
-        download_options(client, underlying, meta, _BACKFILL_START, today)
+        for underlying in ("NIFTY", "BANKNIFTY", "SENSEX"):
+            meta = UNDERLYINGS[underlying]
+            logger.info("=== %s: spot ===", underlying)
+            download_spot(client, underlying, meta, _BACKFILL_START, today)
+            logger.info("=== %s: options ===", underlying)
+            download_options(client, underlying, meta, _BACKFILL_START, today)
 
-    logger.info("ALL DONE")
+        logger.info("ALL DONE")
+        if run is not None:
+            run.status = "completed"
+            run.finished_at = datetime.now(timezone.utc)
+            db.commit()
+    except Exception as exc:  # noqa: BLE001 -- must still update the row before re-raising
+        logger.exception("Download run failed")
+        if run is not None:
+            run.status = "failed"
+            run.error_message = f"{type(exc).__name__}: {exc}"
+            run.finished_at = datetime.now(timezone.utc)
+            db.commit()
+        raise
+    finally:
+        if db is not None:
+            db.close()
 
 
 if __name__ == "__main__":
-    main()
+    main(sys.argv[1] if len(sys.argv) > 1 else None)

@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% block title %}Data Download — FinOps Algo{% endblock %}
+{% block content %}
+{% if active %}
+<meta http-equiv="refresh" content="20">
+{% endif %}
+
+<h4 class="mb-3">Historical Data Download (Superadmin)</h4>
+<p class="small text-body-secondary">
+    Refreshes the local historical data cache every backtest reads from — NIFTY, BANKNIFTY and SENSEX together,
+    spot and options across the full downloaded strike band. Resumable: re-running only fetches what's missing
+    or newly elapsed since the last run, it never re-downloads what's already on disk. Hits your own connected
+    Dhan account's API with its own careful pacing, separate from the live app's — avoid starting this while the
+    market is open with live positions running, so the two don't compete for the same account's rate limit. A
+    full refresh can take several hours.
+</p>
+
+{% if active %}
+<div class="alert alert-primary">
+    <strong>Running</strong> — started by {{ active.started_by.email }} at
+    {{ (active.created_at | to_ist).strftime('%d %b, %H:%M') ~ ' IST' if active.created_at else '' }}.
+    This page refreshes automatically every 20 seconds.
+</div>
+{% else %}
+<form method="post" action="{{ url('/admin/data-download/start') }}" class="mb-4"
+      onsubmit="return confirm('Start a full historical data download? This can take several hours and will use your Dhan account\'s API — avoid this while the market is open with live positions running.');">
+    <button class="btn btn-primary" type="submit">Start Download</button>
+</form>
+{% endif %}
+
+{% if log_tail %}
+<h6 class="mb-2">Log {{ '(running)' if active else '(most recent run)' }}</h6>
+<pre class="bg-body-secondary p-3 rounded small" style="max-height: 400px; overflow-y: auto; white-space: pre-wrap;">{{ log_tail }}</pre>
+{% endif %}
+
+<h6 class="mb-2">Recent Runs</h6>
+<div class="table-responsive">
+    <table class="table table-sm align-middle">
+        <thead>
+            <tr>
+                <th>Started</th>
+                <th>Started By</th>
+                <th>Status</th>
+                <th>Finished</th>
+                <th>Error</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for r in recent %}
+            <tr>
+                <td>{{ (r.created_at | to_ist).strftime('%d %b, %H:%M') ~ ' IST' if r.created_at else '' }}</td>
+                <td>{{ r.started_by.email }}</td>
+                <td>
+                    {% if r.status == 'running' %}<span class="badge text-bg-primary">Running</span>
+                    {% elif r.status == 'completed' %}<span class="badge text-bg-success">Completed</span>
+                    {% else %}<span class="badge text-bg-danger">Failed</span>{% endif %}
+                </td>
+                <td>{{ (r.finished_at | to_ist).strftime('%d %b, %H:%M') ~ ' IST' if r.finished_at else '—' }}</td>
+                <td class="small text-danger">{{ r.error_message }}</td>
+            </tr>
+            {% else %}
+            <tr><td colspan="5" class="text-body-secondary">No downloads run yet.</td></tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}
