@@ -136,3 +136,55 @@ def test_data_download_page_shows_recent_runs_and_log_tail(client, db_session, t
         assert page.status_code == 200
         assert "Completed" in page.text
         assert "ALL DONE" in page.text
+
+
+# --- stopping a running download ---
+
+
+def test_non_superadmin_cannot_stop_a_download(client, db_session):
+    _login_regular_user(client, db_session)
+    resp = client.post("/admin/data-download/stop", follow_redirects=False)
+    assert resp.status_code == 403
+
+
+def test_superadmin_can_stop_a_running_download(client, db_session):
+    _login_as_superadmin(client, db_session)
+
+    with _mock_popen(pid=42):
+        client.post("/admin/data-download/start", follow_redirects=False)
+
+    with patch("app.routers.admin._is_pid_alive", return_value=True), patch("app.routers.admin.os.kill") as mock_kill:
+        resp = client.post("/admin/data-download/stop", follow_redirects=False)
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/admin/data-download"
+    mock_kill.assert_called_once()
+    assert mock_kill.call_args.args[0] == 42
+
+    run = db_session.scalar(select(DataDownloadRun))
+    assert run.status == "stopped"
+    assert run.finished_at is not None
+    assert "baluinbox@gmail.com" in run.error_message
+
+
+def test_stopping_with_nothing_running_is_a_no_op(client, db_session):
+    _login_as_superadmin(client, db_session)
+
+    resp = client.post("/admin/data-download/stop", follow_redirects=False)
+    assert resp.status_code == 303
+    assert db_session.scalar(select(DataDownloadRun)) is None  # nothing was ever created to touch
+
+
+def test_stop_tolerates_a_pid_that_is_already_gone(client, db_session):
+    """os.kill on an already-dead pid raises OSError -- the route must
+    still mark the row stopped rather than 500."""
+    _login_as_superadmin(client, db_session)
+
+    with _mock_popen(pid=99999):
+        client.post("/admin/data-download/start", follow_redirects=False)
+
+    with patch("app.routers.admin._is_pid_alive", return_value=True), patch("app.routers.admin.os.kill", side_effect=OSError("no such process")):
+        resp = client.post("/admin/data-download/stop", follow_redirects=False)
+    assert resp.status_code == 303
+
+    run = db_session.scalar(select(DataDownloadRun))
+    assert run.status == "stopped"

@@ -10,6 +10,7 @@ adding a separate rejection state.
 from __future__ import annotations
 
 import os
+import signal
 import subprocess
 import sys
 import uuid
@@ -191,4 +192,31 @@ def start_data_download(request: Request, db: DbSession, current_user: Superadmi
     db.commit()
 
     flash(request, "Historical data download started — this can take several hours.", "success")
+    return RedirectResponse(url("/admin/data-download"), status_code=303)
+
+
+@router.post("/data-download/stop")
+def stop_data_download(request: Request, db: DbSession, current_user: SuperadminUser):
+    """Terminates the running subprocess directly -- SIGTERM's default
+    disposition kills it outright (this script installs no handler for
+    it), so it never gets a chance to write its own "failed" status the
+    way an ordinary exception would. This route writes the row's final
+    status itself instead of relying on that."""
+    active = _active_download(db)
+    if active is None:
+        flash(request, "No data download is currently running.", "error")
+        return RedirectResponse(url("/admin/data-download"), status_code=303)
+
+    if active.pid is not None:
+        try:
+            os.kill(active.pid, signal.SIGTERM)
+        except OSError:
+            pass  # already gone -- nothing left to signal
+
+    active.status = "stopped"
+    active.error_message = f"Stopped manually by {current_user.email}."
+    active.finished_at = datetime.now(timezone.utc)
+    db.commit()
+
+    flash(request, "Data download stopped.", "success")
     return RedirectResponse(url("/admin/data-download"), status_code=303)

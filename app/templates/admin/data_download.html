@@ -21,6 +21,10 @@
     {{ (active.created_at | to_ist).strftime('%d %b, %H:%M') ~ ' IST' if active.created_at else '' }}.
     This page refreshes automatically every 20 seconds.
 </div>
+<form method="post" action="{{ url('/admin/data-download/stop') }}" class="mb-4"
+      onsubmit="return confirm('Stop the running data download? It can be started again later — anything already downloaded stays on disk, but the current chunk in progress is lost.');">
+    <button class="btn btn-outline-danger" type="submit">Stop Download</button>
+</form>
 {% else %}
 <form method="post" action="{{ url('/admin/data-download/start') }}" class="mb-4"
       onsubmit="return confirm('Start a full historical data download? This can take several hours and will use your Dhan account\'s API — avoid this while the market is open with live positions running.');">
@@ -53,6 +57,7 @@
                 <td>
                     {% if r.status == 'running' %}<span class="badge text-bg-primary">Running</span>
                     {% elif r.status == 'completed' %}<span class="badge text-bg-success">Completed</span>
+                    {% elif r.status == 'stopped' %}<span class="badge text-bg-secondary">Stopped</span>
                     {% else %}<span class="badge text-bg-danger">Failed</span>{% endif %}
                 </td>
                 <td>{{ (r.finished_at | to_ist).strftime('%d %b, %H:%M') ~ ' IST' if r.finished_at else '—' }}</td>
